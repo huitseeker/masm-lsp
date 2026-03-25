@@ -20,10 +20,16 @@ use tower_lsp::lsp_types::{
 
 use super::fixtures::{FixtureKind, find_position};
 
+/// A single published-diagnostics event captured by the recording client.
+type PublishedDiagnostics = (Url, Vec<Diagnostic>, Option<i32>);
+
+/// Shared storage for captured diagnostics.
+type PublishedDiagnosticsBuffer = Arc<Mutex<Vec<PublishedDiagnostics>>>;
+
 /// A recording LSP client that captures published diagnostics.
 #[derive(Clone, Default)]
 pub struct RecordingClient {
-    published: Arc<Mutex<Vec<(Url, Vec<Diagnostic>, Option<i32>)>>>,
+    published: PublishedDiagnosticsBuffer,
 }
 
 #[async_trait]
@@ -46,7 +52,7 @@ impl RecordingClient {
     }
 
     /// Take all published diagnostics, clearing the internal buffer.
-    pub async fn take_published(&self) -> Vec<(Url, Vec<Diagnostic>, Option<i32>)> {
+    pub async fn take_published(&self) -> Vec<PublishedDiagnostics> {
         let mut guard = self.published.lock().await;
         guard.drain(..).collect()
     }
