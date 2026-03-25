@@ -715,19 +715,19 @@ mod tests {
         let canonical_path = <Path as AsRef<str>>::as_ref(path_buf.as_ref()).to_string();
         let arc_path = Arc::from(Path::new(&canonical_path));
         let resolution = SymbolResolution::External(Span::new(SourceSpan::UNKNOWN, arc_path));
-        let mut procedures = HashSet::new();
-        let mut module_paths = HashSet::new();
-        for program in workspace.modules() {
-            let module_path = <Path as AsRef<str>>::as_ref(program.module().path()).to_string();
-            module_paths.insert(module_path.clone());
-            for procedure in program.procedures() {
-                procedures.insert(
+        let (procedures, module_paths) = workspace.modules().fold(
+            (HashSet::new(), HashSet::new()),
+            |(mut procedures, mut module_paths), program| {
+                let module_path = <Path as AsRef<str>>::as_ref(program.module().path()).to_string();
+                module_paths.insert(module_path.clone());
+                procedures.extend(program.procedures().map(|procedure| {
                     summary_key_for_name(&module_path, procedure.name().as_str())
                         .as_str()
-                        .to_string(),
-                );
-            }
-        }
+                        .to_string()
+                }));
+                (procedures, module_paths)
+            },
+        );
         let known_targets = KnownTargets::new(procedures, module_paths);
 
         assert_eq!(

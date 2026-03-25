@@ -123,24 +123,22 @@ impl PreciseAnalysisFrontend for DecompilerAnalysisFrontend<'_> {
 }
 
 fn workspace_known_targets(workspace: &Workspace) -> KnownTargets {
-    let mut procedures = HashSet::new();
-    let mut modules = HashSet::new();
-
-    for program in workspace.modules() {
-        let module_path = <miden_assembly_syntax::ast::Path as AsRef<str>>::as_ref(
-            program.module().path(),
-        )
-        .to_string();
-        modules.insert(module_path.clone());
-
-        for procedure in program.procedures() {
-            procedures.insert(
+    let (procedures, modules) = workspace.modules().fold(
+        (HashSet::new(), HashSet::new()),
+        |(mut procedures, mut modules), program| {
+            let module_path = <miden_assembly_syntax::ast::Path as AsRef<str>>::as_ref(
+                program.module().path(),
+            )
+            .to_string();
+            modules.insert(module_path.clone());
+            procedures.extend(program.procedures().map(|procedure| {
                 summary_key_for_name(&module_path, procedure.name().as_str())
                     .as_str()
-                    .to_string(),
-            );
-        }
-    }
+                    .to_string()
+            }));
+            (procedures, modules)
+        },
+    );
 
     KnownTargets::new(procedures, modules)
 }
