@@ -303,10 +303,10 @@ mod tests {
     }
 
     #[test]
-    fn decompiler_precise_frontend_resolves_external_dependency_aliases() {
+    fn decompiler_precise_frontend_leaves_external_dependency_aliases_opaque() {
         let workspace = workspace_from_modules(&[(
             "app::main",
-            "use ::pkg::math::add->plus\nproc caller\n    exec.plus\nend\n",
+            "use ::math::add->plus\nproc caller\n    exec.plus\nend\n",
         )]);
 
         let frontend = DecompilerAnalysisFrontend::new(&workspace);
@@ -316,6 +316,32 @@ mod tests {
             Some(AnalysisOp::Inst(instruction)) => instruction.invocation().expect("invocation"),
             _ => panic!("expected root invocation"),
         };
+
+        assert_eq!(procedure.resolved_summary_key(invocation), None);
+    }
+
+    #[test]
+    fn decompiler_precise_frontend_resolves_dependency_procedure_alias_when_present() {
+        let workspace = workspace_from_modules(&[
+            ("pkg::math", "pub proc add\n    push.1\nend\n"),
+            (
+                "app::main",
+                "use ::math::add->plus\nproc caller\n    exec.plus\nend\n",
+            ),
+        ]);
+
+        let frontend = DecompilerAnalysisFrontend::new(&workspace);
+        let procedures = frontend.precise_procedures();
+        let procedure = procedures.last().expect("procedure");
+        let invocation = procedure
+            .body()
+            .ops()
+            .first()
+            .and_then(|op| match op {
+                AnalysisOp::Inst(instruction) => instruction.invocation(),
+                _ => None,
+            })
+            .expect("invocation");
 
         assert_eq!(
             procedure

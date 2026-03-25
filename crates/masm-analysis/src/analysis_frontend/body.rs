@@ -520,18 +520,13 @@ fn resolved_summary_key(
             let summary_key = summary_key_for_path(&canonical_path);
 
             if is_symbol_target {
-                if known_targets.contains_procedure(summary_key.as_str())
-                    || external_symbol_alias_looks_like_item(
-                        module,
-                        target_text,
-                        &canonical_path,
-                        known_targets,
-                    )
-                {
-                    Some(summary_key)
-                } else {
-                    None
-                }
+                // A bare imported symbol like `exec.plus` lacks item-kind metadata from
+                // `assembly-syntax`, so the precise frontend stays conservative unless the
+                // canonical callee is already part of the loaded workspace (tracked in
+                // `KnownTargets`).
+                known_targets
+                    .contains_procedure(summary_key.as_str())
+                    .then_some(summary_key)
             } else if known_targets.contains_module(module_path) {
                 None
             } else {
@@ -544,7 +539,9 @@ fn resolved_summary_key(
             let summary_key = summary_key_for_path(&canonical_path);
 
             if is_symbol_target {
-                Some(summary_key)
+                known_targets
+                    .contains_procedure(summary_key.as_str())
+                    .then_some(summary_key)
             } else if known_targets.contains_module(module_path) {
                 None
             } else {
@@ -557,24 +554,6 @@ fn resolved_summary_key(
 
 fn summary_key_for_path(path: &str) -> SummaryKey {
     SummaryKey::new(path.trim_start_matches("::"))
-}
-
-fn external_symbol_alias_looks_like_item(
-    module: &Module,
-    symbol: &str,
-    canonical_path: &str,
-    known_targets: &KnownTargets,
-) -> bool {
-    let module_path = canonical_path.trim_start_matches("::");
-    if known_targets.contains_module(module_path) || module.get_import(symbol).is_none() {
-        return false;
-    }
-
-    canonical_path
-        .split("::")
-        .filter(|segment| !segment.is_empty())
-        .count()
-        >= 3
 }
 
 fn local_procedure_summary_key(
@@ -636,15 +615,17 @@ fn module_path(module: &Module) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
+
     use masm_decompiler::frontend::testing::workspace_from_modules;
     use miden_assembly_syntax::{
-        ast::{ItemIndex, Path},
+        ast::{GlobalItemIndex, ItemIndex, ModuleIndex, Path},
         Word,
     };
     use miden_debug_types::{SourceSpan, Span};
     use std::collections::HashSet;
+
+    use super::*;
 
     #[test]
     fn resolved_summary_key_from_mast_root_is_none() {
@@ -692,6 +673,94 @@ mod tests {
         assert!(
             resolved_summary_key(module, "u64", resolution, true, &known_targets).is_none(),
             "unknown external aliases should not produce summary keys"
+        );
+    }
+
+    #[test]
+    fn resolved_summary_key_filters_two_segment_external_symbol_aliases() {
+        let workspace =
+            workspace_from_modules(&[("math::word_ops", "proc foo\n    push.1\nend\n")]);
+        let module = workspace.modules().next().expect("module").module();
+        let path_buf = miden_assembly_syntax::ast::PathBuf::new("math::add").expect("valid path");
+        let canonical_path = <Path as AsRef<str>>::as_ref(path_buf.as_ref()).to_string();
+        let arc_path = Arc::from(Path::new(&canonical_path));
+        let resolution = SymbolResolution::External(Span::new(SourceSpan::UNKNOWN, arc_path));
+        let known_targets = KnownTargets::new(HashSet::new(), HashSet::new());
+
+        assert!(
+            resolved_summary_key(module, "plus", resolution, true, &known_targets).is_none(),
+            "two-segment external symbol aliases should stay opaque without linker metadata"
+        );
+    }
+
+    #[test]
+    fn resolved_summary_key_preserves_known_external_procedure_aliases() {
+        let modules = &[
+            ("math::helpers", "pub proc add\n    push.1\nend\n"),
+            (
+                "app::main",
+                "use ::math::helpers::add->plus\nproc caller\n    exec.plus\nend\n",
+            ),
+        ];
+        let workspace = workspace_from_modules(modules);
+        let module = workspace
+            .modules()
+            .find(|program| {
+                <Path as AsRef<str>>::as_ref(program.module().path()) == "app::main"
+            })
+            .expect("main")
+            .module();
+        let path_buf =
+            miden_assembly_syntax::ast::PathBuf::new("math::helpers::add").expect("valid path");
+        let canonical_path = <Path as AsRef<str>>::as_ref(path_buf.as_ref()).to_string();
+        let arc_path = Arc::from(Path::new(&canonical_path));
+        let resolution = SymbolResolution::External(Span::new(SourceSpan::UNKNOWN, arc_path));
+        let mut procedures = HashSet::new();
+        let mut module_paths = HashSet::new();
+        for program in workspace.modules() {
+            let module_path = <Path as AsRef<str>>::as_ref(program.module().path()).to_string();
+            module_paths.insert(module_path.clone());
+            for procedure in program.procedures() {
+                procedures.insert(
+                    summary_key_for_name(&module_path, procedure.name().as_str())
+                        .as_str()
+                        .to_string(),
+                );
+            }
+        }
+        let known_targets = KnownTargets::new(procedures, module_paths);
+
+        assert_eq!(
+            resolved_summary_key(module, "plus", resolution, true, &known_targets)
+                .as_ref()
+                .map(SummaryKey::as_str),
+            Some("math::helpers::add"),
+            "external symbol aliases backed by workspace-known procedures should preserve \
+             summary keys"
+        );
+    }
+
+    #[test]
+    fn resolved_summary_key_filters_exact_symbol_targets_not_known_as_procedures() {
+        let workspace =
+            workspace_from_modules(&[("math::word_ops", "proc foo\n    push.1\nend\n")]);
+        let module = workspace.modules().next().expect("module").module();
+        let path_buf =
+            miden_assembly_syntax::ast::PathBuf::new("pkg::math::CONST").expect("valid path");
+        let canonical_path = <Path as AsRef<str>>::as_ref(path_buf.as_ref()).to_string();
+        let arc_path = Arc::from(Path::new(&canonical_path));
+        let resolution = SymbolResolution::Exact {
+            gid: GlobalItemIndex {
+                module: ModuleIndex::const_new(0),
+                index: ItemIndex::const_new(0),
+            },
+            path: Span::new(SourceSpan::UNKNOWN, arc_path),
+        };
+        let known_targets = KnownTargets::new(HashSet::new(), HashSet::new());
+
+        assert!(
+            resolved_summary_key(module, "x", resolution, true, &known_targets).is_none(),
+            "exact symbol targets should only resolve when the frontend knows they are procedures"
         );
     }
 }

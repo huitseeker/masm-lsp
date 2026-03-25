@@ -151,6 +151,11 @@ pub trait PreciseAnalysisFrontend: AnalysisFrontend {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+
     use masm_decompiler::frontend::testing::workspace_from_modules;
     use miden_debug_types::SourceSpan;
 
@@ -237,6 +242,74 @@ mod tests {
         }
     }
 
+    fn core_examples_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("examples")
+            .join("core")
+    }
+
+    fn collect_core_example_files(root: &Path, files: &mut Vec<PathBuf>) {
+        let entries = fs::read_dir(root).expect("read core example directory");
+        for entry in entries {
+            let entry = entry.expect("read core example entry");
+            let path = entry.path();
+            if path.is_dir() {
+                collect_core_example_files(&path, files);
+                continue;
+            }
+
+            let is_masm = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("masm"));
+            if is_masm {
+                files.push(path);
+            }
+        }
+    }
+
+    fn module_name_for_core_example(path: &Path) -> String {
+        let relative = path
+            .strip_prefix(core_examples_dir())
+            .expect("core example file should be under examples/core");
+        let mut segments = vec!["miden".to_string(), "core".to_string()];
+        let stem = relative
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("example file stem should be valid utf-8");
+
+        if let Some(parent) = relative.parent() {
+            segments.extend(
+                parent
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy().to_string()),
+            );
+        }
+
+        if stem != "mod" {
+            segments.push(stem.to_string());
+        }
+
+        segments.join("::")
+    }
+
+    fn core_example_modules() -> Vec<(String, String)> {
+        let mut files = Vec::new();
+        collect_core_example_files(&core_examples_dir(), &mut files);
+        files.sort();
+
+        files.into_iter()
+            .map(|path| {
+                (
+                    module_name_for_core_example(&path),
+                    fs::read_to_string(&path).expect("read core example"),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn syntax_and_decompiler_frontends_match_for_shared_metadata_and_body_shape() {
         let modules = &[
@@ -248,6 +321,39 @@ mod tests {
         ];
 
         assert_eq!(decompiler_snapshots(modules), syntax_snapshots(modules));
+    }
+
+    #[test]
+    fn syntax_and_decompiler_frontends_match_on_core_example_corpus() {
+        let modules = core_example_modules();
+        assert!(
+            !modules.is_empty(),
+            "expected at least one core example module"
+        );
+        let module_refs: Vec<_> = modules
+            .iter()
+            .map(|(name, source)| (name.as_str(), source.as_str()))
+            .collect();
+
+        assert_eq!(
+            decompiler_snapshots(&module_refs),
+            syntax_snapshots(&module_refs)
+        );
+    }
+
+    #[test]
+    fn syntax_frontend_extraction_is_deterministic_on_core_example_corpus() {
+        let modules = core_example_modules();
+        assert!(
+            !modules.is_empty(),
+            "expected at least one core example module"
+        );
+        let module_refs: Vec<_> = modules
+            .iter()
+            .map(|(name, source)| (name.as_str(), source.as_str()))
+            .collect();
+
+        assert_eq!(syntax_snapshots(&module_refs), syntax_snapshots(&module_refs));
     }
 
     #[test]
@@ -293,16 +399,19 @@ mod tests {
     }
 
     #[test]
-    fn decompiler_precise_frontend_preserves_dependency_procedure_alias_summary_keys() {
-        let modules = &[(
-            "app::main",
-            "use ::pkg::math::add->plus\nproc caller\n    exec.plus\nend\n",
-        )];
+    fn decompiler_precise_frontend_resolves_dependency_procedure_alias_in_workspace() {
+        let modules = &[
+            ("pkg::math", "pub proc add\n    push.1\nend\n"),
+            (
+                "app::main",
+                "use ::math::add->plus\nproc caller\n    exec.plus\nend\n",
+            ),
+        ];
 
         let workspace = workspace_from_modules(modules);
         let frontend = DecompilerAnalysisFrontend::new(&workspace);
         let procedures = frontend.precise_procedures();
-        let procedure = procedures.first().expect("caller procedure");
+        let procedure = procedures.last().expect("caller procedure");
         let snapshot = ProcedureSnapshot {
             metadata: procedure.metadata().clone(),
             body: procedure.body().clone(),
@@ -464,6 +573,30 @@ mod tests {
         assert!(matches!(
             invocation.target(),
             AnalysisInvocationTarget::Symbol(target) if target == "m"
+        ));
+    }
+
+    #[test]
+    fn decompiler_precise_frontend_leaves_external_constant_aliases_without_summary_keys() {
+        let modules = &[(
+            "app::main",
+            "use ::pkg::math::CONST->x\nproc caller\n    exec.x\nend\n",
+        )];
+
+        let workspace = workspace_from_modules(modules);
+        let frontend = DecompilerAnalysisFrontend::new(&workspace);
+        let procedures = frontend.precise_procedures();
+        let procedure = procedures.first().expect("caller procedure");
+        let snapshot = ProcedureSnapshot {
+            metadata: procedure.metadata().clone(),
+            body: procedure.body().clone(),
+        };
+        let invocation = first_invocation(&snapshot).expect("invocation");
+
+        assert_eq!(procedure.resolved_summary_key(invocation), None);
+        assert!(matches!(
+            invocation.target(),
+            AnalysisInvocationTarget::Symbol(target) if target == "x"
         ));
     }
 }
