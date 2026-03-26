@@ -6,7 +6,7 @@ use masm_decompiler::{
 };
 
 use super::{
-    shared::{
+    transfer::{
         apply_intrinsic_effect, apply_local_load_scalar, apply_local_load_word, apply_local_store,
         apply_local_store_word, assign_expr_metadata, assign_phi_metadata, expr_output_fact,
         join_loop_head_env, refine_if_envs, seed_input_env, Env, MAX_LOOP_PASSES,
@@ -292,7 +292,7 @@ mod tests {
     use super::ProvenanceLoopState;
     use crate::{
         abstract_interp::JoinSemiLattice,
-        unconstrained_advice::shared::{join_loop_head_env, Env},
+        unconstrained_advice::transfer::{join_loop_head_env, Env},
     };
     use masm_decompiler::{
         ir::{LoopPhi, Var},

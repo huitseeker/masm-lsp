@@ -10,7 +10,7 @@ use masm_decompiler::{
 use super::{
     domain::AdviceFact,
     provenance::assign_call_results,
-    shared::{
+    transfer::{
         apply_intrinsic_effect, apply_local_load_scalar, apply_local_load_word, apply_local_store,
         apply_local_store_word, assign_expr_metadata, assign_phi_metadata, expr_is_proven_nonzero,
         expr_output_fact, refine_if_envs, refine_nonzero_from_intrinsic, seed_input_env, stmt_span,

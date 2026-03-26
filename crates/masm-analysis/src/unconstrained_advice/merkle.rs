@@ -10,7 +10,7 @@ use masm_decompiler::{
 use super::{
     domain::AdviceFact,
     inter::PreparedProc,
-    shared::{intrinsic_base_name, Env},
+    transfer::{intrinsic_base_name, Env},
     summary::{AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummaryMap},
     walker::{self, SinkDetector},
 };

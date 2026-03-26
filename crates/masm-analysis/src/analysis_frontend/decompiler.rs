@@ -1,13 +1,18 @@
 //! `masm-decompiler`-backed implementation of the analysis frontend traits.
 
 use masm_decompiler::frontend::Workspace;
+use masm_decompiler::{
+    lift::lift_proc,
+    signature::{ProcSignature, SignatureMap},
+    symbol::resolution::create_resolver,
+};
 use std::{collections::HashSet, sync::Arc};
 
 use super::{
     body::{build_body, collect_precise_invocations, KnownTargets, ResolvedInvocation},
     procedure::build_procedure_metadata,
-    summary_key_for_name, AnalysisBody, AnalysisFrontend, AnalysisProcedure,
-    PreciseAnalysisFrontend, PreciseAnalysisProcedure, ProcedureMetadata,
+    summary_key_for_name, AnalysisBody, AnalysisFrontend, AnalysisProcedure, LiftedAnalysisFrontend,
+    LiftedProcedure, PreciseAnalysisFrontend, PreciseAnalysisProcedure, ProcedureMetadata,
 };
 
 /// Analysis frontend backed by a `masm-decompiler` workspace.
@@ -122,6 +127,35 @@ impl PreciseAnalysisFrontend for DecompilerAnalysisFrontend<'_> {
     }
 }
 
+impl LiftedAnalysisFrontend for DecompilerAnalysisFrontend<'_> {
+    fn lifted_procedures(&self, signatures: &SignatureMap) -> Vec<LiftedProcedure> {
+        self.workspace
+            .modules()
+            .flat_map(|program| {
+                let module = program.module();
+                program.procedures().map(move |procedure| {
+                    let proc_path =
+                        crate::SymbolPath::from_module_and_name(module, procedure.name().as_str());
+                    let Some(signature) = signatures.get(&proc_path) else {
+                        return LiftedProcedure::new(proc_path, 0, 0, None);
+                    };
+
+                    let (inputs, outputs) = match signature {
+                        ProcSignature::Known {
+                            inputs, outputs, ..
+                        } => (*inputs, *outputs),
+                        ProcSignature::Unknown => return LiftedProcedure::new(proc_path, 0, 0, None),
+                    };
+
+                    let resolver = create_resolver(module, self.workspace.source_manager());
+                    let stmts = lift_proc(procedure, &proc_path, &resolver, signatures).ok();
+                    LiftedProcedure::new(proc_path, inputs, outputs, stmts)
+                })
+            })
+            .collect()
+    }
+}
+
 fn workspace_known_targets(workspace: &Workspace) -> KnownTargets {
     let (procedures, modules) = workspace.modules().fold(
         (HashSet::new(), HashSet::new()),
@@ -150,9 +184,9 @@ mod tests {
         analysis_frontend::{
             AnalysisFrontend, AnalysisInvocationKind, AnalysisInvocationTarget,
             AnalysisLocalAccess, AnalysisLocalLane, AnalysisOp, AnalysisProcedure,
-            PreciseAnalysisFrontend, PreciseAnalysisProcedure,
+            LiftedAnalysisFrontend, PreciseAnalysisFrontend, PreciseAnalysisProcedure,
         },
-        StackSignature,
+        SignatureMap, StackSignature,
     };
 
     use super::DecompilerAnalysisFrontend;
@@ -460,5 +494,27 @@ mod tests {
                 .map(|key| key.as_str()),
             Some("pkg::math::add")
         );
+    }
+
+    #[test]
+    fn decompiler_lifted_frontend_exposes_lifted_statements_for_known_signature() {
+        let workspace = workspace_from_modules(&[(
+            "app::main",
+            "proc caller\n    push.1\nend\n",
+        )]);
+
+        let frontend = DecompilerAnalysisFrontend::new(&workspace);
+        let signatures = SignatureMap::from_iter([(
+            crate::SymbolPath::new("app::main::caller".to_string()),
+            masm_decompiler::signature::ProcSignature::known(0, 1, 1),
+        )]);
+
+        let lifted = frontend.lifted_procedures(&signatures);
+        let procedure = lifted.first().expect("lifted procedure");
+
+        assert_eq!(procedure.symbol_path().as_str(), "app::main::caller");
+        assert_eq!(procedure.inputs(), 0);
+        assert_eq!(procedure.outputs(), 1);
+        assert!(procedure.stmts().is_some());
     }
 }

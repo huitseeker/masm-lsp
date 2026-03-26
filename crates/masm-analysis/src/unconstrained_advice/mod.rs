@@ -6,8 +6,9 @@ mod inter;
 mod merkle;
 mod nonzero;
 mod provenance;
-mod shared;
 mod summary;
+mod state;
+mod transfer;
 mod u32;
 mod walker;
 

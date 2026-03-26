@@ -5,9 +5,7 @@ use std::collections::HashMap;
 use masm_decompiler::{
     callgraph::CallGraph,
     frontend::Workspace,
-    lift::lift_proc,
     signature::{ProcSignature, SignatureMap},
-    symbol::resolution::create_resolver,
     types::TypeSummaryMap,
 };
 
@@ -19,7 +17,10 @@ use super::{
     summary::{AdviceDiagnosticsMap, AdviceSummary, AdviceSummaryMap},
     u32::collect_u32_diagnostics,
 };
-use crate::analysis_inputs;
+use crate::{
+    analysis_frontend::{DecompilerAnalysisFrontend, LiftedAnalysisFrontend},
+    analysis_inputs,
+};
 
 /// Prepared lifting result for one procedure.
 #[derive(Debug, Clone)]
@@ -39,7 +40,18 @@ pub fn infer_unconstrained_advice(
     signatures: &SignatureMap,
     type_summaries: &TypeSummaryMap,
 ) -> (AdviceSummaryMap, AdviceDiagnosticsMap) {
-    let prepared = prepare_procs(workspace, callgraph, signatures);
+    let frontend = DecompilerAnalysisFrontend::new(workspace);
+    infer_unconstrained_advice_with_frontend(&frontend, callgraph, signatures, type_summaries)
+}
+
+/// Infer unconstrained-advice summaries and diagnostics using a lifted frontend capability.
+fn infer_unconstrained_advice_with_frontend<F: LiftedAnalysisFrontend>(
+    frontend: &F,
+    callgraph: &CallGraph,
+    signatures: &SignatureMap,
+    type_summaries: &TypeSummaryMap,
+) -> (AdviceSummaryMap, AdviceDiagnosticsMap) {
+    let prepared = prepare_procs(frontend, callgraph, signatures);
     let provenance_summaries = infer_provenance_summaries(callgraph, &prepared);
     let mut diagnostics = collect_u32_diagnostics(&prepared, &provenance_summaries, type_summaries);
     let address_diagnostics = collect_address_diagnostics(&prepared, &provenance_summaries);
@@ -54,79 +66,40 @@ pub fn infer_unconstrained_advice(
 }
 
 /// Prepare and lift all procedures once for the downstream analyses.
-fn prepare_procs(
-    workspace: &Workspace,
+fn prepare_procs<F: LiftedAnalysisFrontend>(
+    frontend: &F,
     callgraph: &CallGraph,
     signatures: &SignatureMap,
 ) -> HashMap<crate::SymbolPath, PreparedProc> {
-    let mut prepared = HashMap::new();
+    let mut prepared: HashMap<_, _> = frontend
+        .lifted_procedures(signatures)
+        .into_iter()
+        .map(|procedure| {
+            let proc_path = procedure.symbol_path().clone();
+            let prepared = PreparedProc {
+                inputs: procedure.inputs(),
+                outputs: procedure.outputs(),
+                stmts: procedure.into_stmts(),
+            };
+            (proc_path, prepared)
+        })
+        .collect();
 
     for node in callgraph.iter() {
         let proc_path = node.name.clone();
-        let Some(signature) = signatures.get(&proc_path) else {
-            prepared.insert(
-                proc_path,
-                PreparedProc {
-                    inputs: 0,
-                    outputs: 0,
-                    stmts: None,
-                },
-            );
-            continue;
-        };
-
-        let (inputs, outputs) = match signature {
-            ProcSignature::Known {
-                inputs, outputs, ..
-            } => (*inputs, *outputs),
-            ProcSignature::Unknown => {
-                prepared.insert(
-                    proc_path,
-                    PreparedProc {
-                        inputs: 0,
-                        outputs: 0,
-                        stmts: None,
-                    },
-                );
-                continue;
-            }
-        };
-
-        let Some((program, proc)) = workspace.lookup_proc_entry(&proc_path) else {
-            prepared.insert(
-                proc_path,
-                PreparedProc {
-                    inputs,
-                    outputs,
-                    stmts: None,
-                },
-            );
-            continue;
-        };
-
-        let resolver = create_resolver(program.module(), workspace.source_manager());
-        let stmts = match lift_proc(proc, &proc_path, &resolver, signatures) {
-            Ok(stmts) => Some(stmts),
-            Err(_) => {
-                prepared.insert(
-                    proc_path,
-                    PreparedProc {
-                        inputs,
-                        outputs,
-                        stmts: None,
-                    },
-                );
-                continue;
-            }
-        };
-        prepared.insert(
-            proc_path,
+        prepared.entry(proc_path.clone()).or_insert_with(|| {
+            let (inputs, outputs) = match signatures.get(&proc_path) {
+                Some(ProcSignature::Known {
+                    inputs, outputs, ..
+                }) => (*inputs, *outputs),
+                _ => (0, 0),
+            };
             PreparedProc {
                 inputs,
                 outputs,
-                stmts,
-            },
-        );
+                stmts: None,
+            }
+        });
     }
 
     prepared

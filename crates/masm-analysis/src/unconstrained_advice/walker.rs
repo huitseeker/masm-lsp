@@ -11,7 +11,7 @@ use super::{
     domain::AdviceFact,
     inter::PreparedProc,
     provenance::assign_call_results,
-    shared::{
+    transfer::{
         apply_intrinsic_effect, apply_local_load_scalar, apply_local_load_word, apply_local_store,
         apply_local_store_word, assign_expr_metadata, assign_phi_metadata, expr_output_fact,
         join_loop_head_env, refine_if_envs, seed_input_env, Env, MAX_LOOP_PASSES,

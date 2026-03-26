@@ -10,6 +10,7 @@
 //! terms of the minimal contract first, and analyses that need stronger interprocedural callee
 //! identities can opt into the richer capability explicitly.
 
+use masm_decompiler::ir::Stmt;
 use miden_debug_types::SourceSpan;
 
 use crate::StackSignature;
@@ -153,6 +154,70 @@ pub trait PreciseAnalysisFrontend: AnalysisFrontend {
 
     /// Return all procedures currently visible to this precise frontend.
     fn precise_procedures(&self) -> Vec<Self::PreciseProcedure<'_>>;
+}
+
+/// Lifted procedure body exposed by a richer backend capability.
+///
+/// This is the Phase 1 bridge between the new abstract-interpretation structure and the existing
+/// decompiler SSA. It keeps the lifting boundary behind a trait so analyses no longer depend on the
+/// workspace API directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiftedProcedure {
+    symbol_path: crate::SymbolPath,
+    inputs: usize,
+    outputs: usize,
+    stmts: Option<Vec<Stmt>>,
+}
+
+impl LiftedProcedure {
+    /// Create one lifted procedure entry.
+    pub fn new(
+        symbol_path: crate::SymbolPath,
+        inputs: usize,
+        outputs: usize,
+        stmts: Option<Vec<Stmt>>,
+    ) -> Self {
+        Self {
+            symbol_path,
+            inputs,
+            outputs,
+            stmts,
+        }
+    }
+
+    /// Return the canonical procedure path used by downstream analyses.
+    pub fn symbol_path(&self) -> &crate::SymbolPath {
+        &self.symbol_path
+    }
+
+    /// Return the inferred input arity used for lifting.
+    pub fn inputs(&self) -> usize {
+        self.inputs
+    }
+
+    /// Return the inferred output arity used for lifting.
+    pub fn outputs(&self) -> usize {
+        self.outputs
+    }
+
+    /// Return the lifted statement body, if available.
+    pub fn stmts(&self) -> Option<&[Stmt]> {
+        self.stmts.as_deref()
+    }
+
+    /// Consume this entry and return its lifted statement body, if available.
+    pub fn into_stmts(self) -> Option<Vec<Stmt>> {
+        self.stmts
+    }
+}
+
+/// Transitional backend capability for analyses that still consume lifted decompiler SSA.
+///
+/// The minimal frontend contract remains the long-term target, but Phase 1 can migrate the
+/// analysis driver behind this trait first and keep the decompiler-specific lifting in one place.
+pub trait LiftedAnalysisFrontend {
+    /// Return the lifted procedures currently visible to this frontend.
+    fn lifted_procedures(&self, signatures: &crate::SignatureMap) -> Vec<LiftedProcedure>;
 }
 
 #[cfg(test)]
