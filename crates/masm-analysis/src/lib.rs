@@ -15,6 +15,7 @@ use miden_assembly_syntax::ast::{
 };
 use miden_debug_types::{DefaultSourceManager, SourceSpan, Spanned};
 
+pub mod abstract_interp;
 pub mod analysis_frontend;
 mod unconstrained_advice;
 
