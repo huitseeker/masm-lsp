@@ -10,11 +10,11 @@ use masm_decompiler::{
 use super::{
     domain::AdviceFact,
     inter::PreparedProc,
-    provenance::assign_call_results,
     transfer::{
-        apply_intrinsic_effect, apply_local_load_scalar, apply_local_load_word, apply_local_store,
-        apply_local_store_word, assign_expr_metadata, assign_phi_metadata, expr_output_fact,
-        join_loop_head_env, refine_if_envs, seed_input_env, Env, MAX_LOOP_PASSES,
+        apply_callee_summary, apply_intrinsic_effect, apply_local_load_scalar,
+        apply_local_load_word, apply_local_store, apply_local_store_word, assign_expr_metadata,
+        assign_phi_metadata, expr_output_fact, join_loop_head_env, refine_if_envs, seed_input_env,
+        Env, MAX_LOOP_PASSES,
     },
     summary::{AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSummaryMap},
 };
@@ -182,7 +182,7 @@ fn eval_stmt<D: SinkDetector>(
         Stmt::Call { call, .. }
         | Stmt::Exec { call, .. }
         | Stmt::SysCall { call, .. } => {
-            assign_call_results(
+            apply_callee_summary(
                 &mut env,
                 &call.target,
                 &call.args,

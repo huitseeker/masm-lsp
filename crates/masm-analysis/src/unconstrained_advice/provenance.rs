@@ -2,14 +2,14 @@
 
 use masm_decompiler::{
     ir::{LocalAccessKind, LoopPhi, Stmt},
-    SymbolPath,
 };
 
 use super::{
     transfer::{
         apply_intrinsic_effect, apply_local_load_scalar, apply_local_load_word, apply_local_store,
-        apply_local_store_word, assign_expr_metadata, assign_phi_metadata, expr_output_fact,
-        join_loop_head_env, refine_if_envs, seed_input_env, Env, MAX_LOOP_PASSES,
+        apply_local_store_word, apply_callee_summary, assign_expr_metadata, assign_phi_metadata,
+        expr_output_fact, join_loop_head_env, refine_if_envs, seed_input_env, Env,
+        MAX_LOOP_PASSES,
     },
     summary::{AdviceSummary, AdviceSummaryMap},
 };
@@ -154,7 +154,7 @@ fn eval_stmt(stmt: &Stmt, mut env: Env, callee_summaries: &AdviceSummaryMap) -> 
             }
         },
         Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
-            assign_call_results(
+            apply_callee_summary(
                 &mut env,
                 &call.target,
                 &call.args,
@@ -234,59 +234,6 @@ fn eval_loop_block(
         opaque,
     }
 }
-
-/// Assign call-result facts by substituting caller arguments into callee summaries.
-pub(crate) fn assign_call_results(
-    env: &mut Env,
-    target: &str,
-    args: &[masm_decompiler::ir::Var],
-    results: &[masm_decompiler::ir::Var],
-    callee_summaries: &AdviceSummaryMap,
-) {
-    let Some(summary) = callee_summaries.get(&SymbolPath::new(target.to_string())) else {
-        for result in results {
-            env.set_var_fact(result, super::domain::AdviceFact::bottom());
-            env.clear_var_metadata(result);
-        }
-        return;
-    };
-    if summary.is_opaque() {
-        for result in results {
-            env.set_var_fact(result, super::domain::AdviceFact::bottom());
-            env.clear_var_metadata(result);
-        }
-        return;
-    }
-
-    let arg_facts = args
-        .iter()
-        .map(|arg| env.fact_for_var(arg))
-        .collect::<Vec<_>>();
-    for (result, summary_fact) in results.iter().zip(summary.outputs().iter()) {
-        env.set_var_fact(result, substitute_output_fact(summary_fact, &arg_facts));
-        env.clear_var_metadata(result);
-    }
-    for result in results.iter().skip(summary.output_count()) {
-        env.set_var_fact(result, super::domain::AdviceFact::bottom());
-        env.clear_var_metadata(result);
-    }
-}
-
-/// Substitute caller argument facts into a callee output summary fact.
-fn substitute_output_fact(
-    summary_fact: &super::domain::AdviceFact,
-    arg_facts: &[super::domain::AdviceFact],
-) -> super::domain::AdviceFact {
-    let mut substituted = super::domain::AdviceFact::bottom();
-    substituted.source_spans = summary_fact.source_spans.clone();
-    for input_index in &summary_fact.from_inputs {
-        if let Some(arg_fact) = arg_facts.get(*input_index) {
-            substituted = substituted.join(arg_fact);
-        }
-    }
-    substituted
-}
-
 #[cfg(test)]
 mod tests {
     use super::ProvenanceLoopState;

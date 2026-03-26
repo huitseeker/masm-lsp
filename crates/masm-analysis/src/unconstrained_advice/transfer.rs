@@ -2,12 +2,14 @@
 
 use masm_decompiler::{
     ir::{BinOp, Expr, Intrinsic, LocalAccessKind, LoopPhi, Stmt, UnOp, Var},
+    SymbolPath,
     types::VarKey,
 };
 
 use super::{
     domain::AdviceFact,
     state::EqZeroWitness,
+    summary::AdviceSummaryMap,
 };
 pub(crate) use super::state::Env;
 
@@ -321,6 +323,41 @@ pub(crate) fn apply_local_load_word(
     }
 }
 
+/// Apply interprocedural summary substitution at one direct call site.
+///
+/// This is the explicit summary-application step of the Phase 1 abstract interpreter: resolve the
+/// callee summary, substitute caller argument facts into summarized outputs, and write the results
+/// back into the caller state.
+pub(crate) fn apply_callee_summary(
+    env: &mut Env,
+    target: &str,
+    args: &[Var],
+    results: &[Var],
+    callee_summaries: &AdviceSummaryMap,
+) {
+    let Some(summary) = callee_summaries.get(&SymbolPath::new(target.to_string())) else {
+        clear_call_results(env, results);
+        return;
+    };
+    if summary.is_opaque() {
+        clear_call_results(env, results);
+        return;
+    }
+
+    let arg_facts = args
+        .iter()
+        .map(|arg| env.fact_for_var(arg))
+        .collect::<Vec<_>>();
+    for (result, summary_fact) in results.iter().zip(summary.outputs().iter()) {
+        env.set_var_fact(result, substitute_output_fact(summary_fact, &arg_facts));
+        env.clear_var_metadata(result);
+    }
+    for result in results.iter().skip(summary.output_count()) {
+        env.set_var_fact(result, AdviceFact::bottom());
+        env.clear_var_metadata(result);
+    }
+}
+
 /// Return the variable compared against zero in an `eq.0`-shaped expression.
 pub(crate) fn zero_comparison_var<'a>(lhs: &'a Expr, rhs: &'a Expr) -> Option<&'a Var> {
     match (lhs, rhs) {
@@ -404,5 +441,88 @@ fn apply_adv_pipe_effect(
     for result in &intrinsic.results {
         env.set_var_fact(result, AdviceFact::from_source(span));
         env.clear_var_metadata(result);
+    }
+}
+
+/// Clear call outputs when the callee is missing or opaque.
+fn clear_call_results(env: &mut Env, results: &[Var]) {
+    for result in results {
+        env.set_var_fact(result, AdviceFact::bottom());
+        env.clear_var_metadata(result);
+    }
+}
+
+/// Substitute caller argument facts into one summarized callee output.
+fn substitute_output_fact(summary_fact: &AdviceFact, arg_facts: &[AdviceFact]) -> AdviceFact {
+    let mut substituted = AdviceFact::bottom();
+    substituted.source_spans = summary_fact.source_spans.clone();
+    for input_index in &summary_fact.from_inputs {
+        if let Some(arg_fact) = arg_facts.get(*input_index) {
+            substituted = substituted.join(arg_fact);
+        }
+    }
+    substituted
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{apply_callee_summary, AdviceFact, Env};
+    use crate::unconstrained_advice::summary::AdviceSummary;
+    use masm_decompiler::{ir::Var, SymbolPath};
+    use miden_debug_types::SourceSpan;
+
+    /// Return a small synthetic SSA variable for transfer tests.
+    fn test_var(index: u8) -> Var {
+        Var::new(u64::from(index).into(), usize::from(index))
+    }
+
+    #[test]
+    fn callee_summary_substitutes_argument_provenance() {
+        let arg = test_var(0);
+        let result = test_var(1);
+        let mut env = Env::default();
+        let arg_fact = AdviceFact::from_source(SourceSpan::UNKNOWN).join(&AdviceFact::from_input(0));
+        env.set_var_fact(&arg, arg_fact.clone());
+
+        let summaries = HashMap::from([(
+            SymbolPath::new("callee".to_string()),
+            AdviceSummary::new(vec![AdviceFact::from_input(0)]),
+        )]);
+
+        apply_callee_summary(
+            &mut env,
+            "callee",
+            &[arg],
+            std::slice::from_ref(&result),
+            &summaries,
+        );
+
+        assert_eq!(env.fact_for_var(&result), arg_fact);
+    }
+
+    #[test]
+    fn opaque_callee_summary_clears_result_facts() {
+        let arg = test_var(0);
+        let result = test_var(1);
+        let mut env = Env::default();
+        env.set_var_fact(&arg, AdviceFact::from_input(0));
+        env.set_var_fact(&result, AdviceFact::from_input(1));
+
+        let summaries = HashMap::from([(
+            SymbolPath::new("callee".to_string()),
+            AdviceSummary::opaque_with_arity(1),
+        )]);
+
+        apply_callee_summary(
+            &mut env,
+            "callee",
+            &[arg],
+            std::slice::from_ref(&result),
+            &summaries,
+        );
+
+        assert_eq!(env.fact_for_var(&result), AdviceFact::bottom());
     }
 }

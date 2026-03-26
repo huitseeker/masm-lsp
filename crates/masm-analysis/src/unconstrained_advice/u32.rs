@@ -8,12 +8,11 @@ use masm_decompiler::{
 
 use super::{
     domain::AdviceFact,
-    provenance::assign_call_results,
     transfer::{
-        apply_intrinsic_effect, apply_local_load_scalar, apply_local_load_word, apply_local_store,
-        apply_local_store_word, assign_expr_metadata, assign_phi_metadata, expr_output_fact,
-        intrinsic_requires_u32_precondition, refine_if_envs, seed_input_env, stmt_span, Env,
-        MAX_LOOP_PASSES,
+        apply_callee_summary, apply_intrinsic_effect, apply_local_load_scalar,
+        apply_local_load_word, apply_local_store, apply_local_store_word, assign_expr_metadata,
+        assign_phi_metadata, expr_output_fact, intrinsic_requires_u32_precondition,
+        refine_if_envs, seed_input_env, stmt_span, Env, MAX_LOOP_PASSES,
     },
     summary::{AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummaryMap},
 };
@@ -144,7 +143,7 @@ impl<'a> ProcU32Analyzer<'a> {
             | Stmt::Exec { span, call }
             | Stmt::SysCall { span, call } => {
                 diagnostics.extend(self.call_diagnostics(*span, &call.target, &call.args, &env));
-                assign_call_results(
+                apply_callee_summary(
                     &mut env,
                     &call.target,
                     &call.args,
