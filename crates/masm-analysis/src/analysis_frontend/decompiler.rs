@@ -1,18 +1,13 @@
 //! `masm-decompiler`-backed implementation of the analysis frontend traits.
 
-use std::{collections::HashSet, sync::Arc};
 use masm_decompiler::frontend::Workspace;
+use std::{collections::HashSet, sync::Arc};
 
 use super::{
-    body::{collect_precise_invocations, build_body, KnownTargets, ResolvedInvocation},
+    body::{build_body, collect_precise_invocations, KnownTargets, ResolvedInvocation},
     procedure::build_procedure_metadata,
-    AnalysisBody,
-    AnalysisFrontend,
-    AnalysisProcedure,
-    PreciseAnalysisFrontend,
-    PreciseAnalysisProcedure,
-    ProcedureMetadata,
-    summary_key_for_name,
+    summary_key_for_name, AnalysisBody, AnalysisFrontend, AnalysisProcedure,
+    PreciseAnalysisFrontend, PreciseAnalysisProcedure, ProcedureMetadata,
 };
 
 /// Analysis frontend backed by a `masm-decompiler` workspace.
@@ -41,6 +36,7 @@ impl<'a> DecompilerAnalysisFrontend<'a> {
             self.workspace.source_manager(),
             procedure.body(),
             known_targets,
+            body.id(),
         );
 
         DecompilerProcedure {
@@ -106,7 +102,11 @@ impl PreciseAnalysisProcedure for DecompilerProcedure<'_> {
     ) -> Option<&super::SummaryKey> {
         self.resolved_invocations
             .iter()
-            .find(|resolved| resolved.span() == invocation.span())
+            .find(|resolved| {
+                resolved.id() == invocation.id()
+                    && resolved.span() == invocation.span()
+                    && resolved.body_id() == invocation.body_id()
+            })
             .map(|resolved| resolved.summary_key())
     }
 }
@@ -126,10 +126,9 @@ fn workspace_known_targets(workspace: &Workspace) -> KnownTargets {
     let (procedures, modules) = workspace.modules().fold(
         (HashSet::new(), HashSet::new()),
         |(mut procedures, mut modules), program| {
-            let module_path = <miden_assembly_syntax::ast::Path as AsRef<str>>::as_ref(
-                program.module().path(),
-            )
-            .to_string();
+            let module_path =
+                <miden_assembly_syntax::ast::Path as AsRef<str>>::as_ref(program.module().path())
+                    .to_string();
             modules.insert(module_path.clone());
             procedures.extend(program.procedures().map(|procedure| {
                 summary_key_for_name(&module_path, procedure.name().as_str())
@@ -298,6 +297,120 @@ mod tests {
                         )
                 )
         ));
+    }
+
+    #[test]
+    fn decompiler_frontend_assigns_distinct_invocation_ids_in_body_order() {
+        let workspace = workspace_from_modules(&[(
+            "app::main",
+            "proc caller\n    exec.foo\n    if.true\n        call.bar\n    else\n        syscall.baz\n    end\nend\n",
+        )]);
+
+        let frontend = DecompilerAnalysisFrontend::new(&workspace);
+        let procedures = frontend.procedures();
+        let procedure = procedures.first().expect("procedure");
+        let mut invocation_ids = Vec::new();
+
+        for op in procedure.body().ops() {
+            match op {
+                AnalysisOp::Inst(instruction) => {
+                    if let Some(invocation) = instruction.invocation() {
+                        invocation_ids.push(invocation.id().ordinal());
+                    }
+                }
+                AnalysisOp::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    let then_invocation = then_body
+                        .ops()
+                        .first()
+                        .and_then(|op| match op {
+                            AnalysisOp::Inst(instruction) => instruction.invocation(),
+                            _ => None,
+                        })
+                        .expect("then invocation");
+                    let else_invocation = else_body
+                        .ops()
+                        .first()
+                        .and_then(|op| match op {
+                            AnalysisOp::Inst(instruction) => instruction.invocation(),
+                            _ => None,
+                        })
+                        .expect("else invocation");
+                    invocation_ids.push(then_invocation.id().ordinal());
+                    invocation_ids.push(else_invocation.id().ordinal());
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(invocation_ids, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn decompiler_precise_frontend_does_not_cross_match_procedures() {
+        let workspace = workspace_from_modules(&[
+            (
+                "alpha",
+                "proc callee\n    push.1\nend\nproc caller\n    call.callee\nend\n",
+            ),
+            (
+                "beta",
+                "proc callee\n    push.1\nend\nproc caller\n    call.callee\nend\n",
+            ),
+        ]);
+
+        let frontend = DecompilerAnalysisFrontend::new(&workspace);
+        let mut callers: Vec<_> = frontend
+            .procedures()
+            .into_iter()
+            .filter(|procedure| {
+                procedure
+                    .metadata()
+                    .summary_key()
+                    .as_str()
+                    .ends_with("::caller")
+            })
+            .collect();
+        assert_eq!(callers.len(), 2);
+
+        let first_caller = callers.remove(0);
+        let second_caller = callers.remove(0);
+        let first_invocation = first_caller
+            .body()
+            .ops()
+            .first()
+            .and_then(|op| match op {
+                AnalysisOp::Inst(instruction) => instruction.invocation().cloned(),
+                _ => None,
+            })
+            .expect("first invocation");
+        let second_invocation = second_caller
+            .body()
+            .ops()
+            .first()
+            .and_then(|op| match op {
+                AnalysisOp::Inst(instruction) => instruction.invocation().cloned(),
+                _ => None,
+            })
+            .expect("second invocation");
+
+        assert_eq!(
+            first_caller
+                .resolved_summary_key(&first_invocation)
+                .map(|key| key.as_str()),
+            Some("alpha::callee")
+        );
+        assert_eq!(
+            second_caller
+                .resolved_summary_key(&second_invocation)
+                .map(|key| key.as_str()),
+            Some("beta::callee")
+        );
+        assert_eq!(first_caller.resolved_summary_key(&second_invocation), None);
+        assert_eq!(second_caller.resolved_summary_key(&first_invocation), None);
     }
 
     #[test]

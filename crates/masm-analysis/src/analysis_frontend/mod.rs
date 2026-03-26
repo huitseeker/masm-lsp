@@ -20,8 +20,9 @@ mod procedure;
 mod syntax;
 
 pub use body::{
-    AnalysisBody, AnalysisInstruction, AnalysisInvocation, AnalysisInvocationKind,
-    AnalysisInvocationTarget, AnalysisLocalAccess, AnalysisLocalLane, AnalysisOp,
+    AnalysisBody, AnalysisInstruction, AnalysisInvocation, AnalysisInvocationId,
+    AnalysisInvocationKind, AnalysisInvocationTarget, AnalysisLocalAccess, AnalysisLocalLane,
+    AnalysisOp,
 };
 
 pub use decompiler::{DecompilerAnalysisFrontend, DecompilerProcedure};
@@ -126,10 +127,15 @@ pub trait AnalysisFrontend {
 /// Richer procedure contract for backends that can classify invocation targets precisely.
 ///
 /// Backends implementing this trait refine the minimal structural view with callee identities for
-/// invocation sites they can classify as concrete procedures.
+/// invocation sites they can classify as concrete procedures. Phase 1 uses
+/// [`AnalysisInvocation::id`] as the stable call-site key for summary application state.
 pub trait PreciseAnalysisProcedure: AnalysisProcedure {
     /// Return the resolved callee summary key for `invocation`, if this backend can classify it as
     /// a concrete procedure.
+    ///
+    /// Future abstract-interpretation passes will use this alongside [`AnalysisInvocation::id`] to
+    /// attach call-site-specific summary facts while keeping the transfer loop generic over the
+    /// minimal frontend shape.
     fn resolved_summary_key(&self, invocation: &AnalysisInvocation) -> Option<&SummaryKey>;
 }
 
@@ -170,6 +176,19 @@ mod tests {
     fn summary_key_round_trips() {
         let key = SummaryKey::new("miden::math::add");
         assert_eq!(key.as_str(), "miden::math::add");
+    }
+
+    #[test]
+    fn invocation_ids_round_trip_ordinals() {
+        let invocation = AnalysisInvocation::new(
+            super::AnalysisInvocationId::new(3),
+            super::body::AnalysisBodyId::new(),
+            super::AnalysisInvocationKind::Exec,
+            AnalysisInvocationTarget::Symbol("foo".to_string()),
+            SourceSpan::UNKNOWN,
+        );
+
+        assert_eq!(invocation.id().ordinal(), 3);
     }
 
     #[test]
@@ -300,7 +319,8 @@ mod tests {
         collect_core_example_files(&core_examples_dir(), &mut files);
         files.sort();
 
-        files.into_iter()
+        files
+            .into_iter()
             .map(|path| {
                 (
                     module_name_for_core_example(&path),
@@ -353,7 +373,10 @@ mod tests {
             .map(|(name, source)| (name.as_str(), source.as_str()))
             .collect();
 
-        assert_eq!(syntax_snapshots(&module_refs), syntax_snapshots(&module_refs));
+        assert_eq!(
+            syntax_snapshots(&module_refs),
+            syntax_snapshots(&module_refs)
+        );
     }
 
     #[test]

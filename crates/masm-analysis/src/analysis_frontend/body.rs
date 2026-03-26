@@ -1,6 +1,10 @@
 //! Normalized MASM procedure bodies exposed to analysis frontends.
 
-use std::{collections::HashSet, sync::Arc};
+use std::sync::atomic::Ordering;
+use std::{
+    collections::HashSet,
+    sync::{atomic::AtomicUsize, Arc},
+};
 
 use miden_assembly_syntax::{
     ast::{
@@ -12,6 +16,8 @@ use miden_assembly_syntax::{
 use miden_debug_types::{SourceSpan, Span, Spanned};
 
 use super::{summary_key_for_name, SummaryKey};
+
+static BODY_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Known module and procedure targets visible to the frontend.
 #[derive(Clone)]
@@ -37,17 +43,39 @@ impl KnownTargets {
     }
 }
 
+/// Stable identifier for one normalized procedure body built by the frontend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AnalysisBodyId(usize);
+
+impl AnalysisBodyId {
+    /// Allocate a fresh body identifier.
+    pub(crate) fn new() -> Self {
+        Self(BODY_ID_COUNTER.fetch_add(1, Ordering::SeqCst))
+    }
+
+    /// Return the numeric index of this body.
+    pub fn index(self) -> usize {
+        self.0
+    }
+}
+
 /// A normalized MASM block for frontend consumers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct AnalysisBody {
+    id: AnalysisBodyId,
     span: SourceSpan,
     ops: Vec<AnalysisOp>,
 }
 
 impl AnalysisBody {
     /// Create a normalized body from its source span and root operations.
-    pub fn new(span: SourceSpan, ops: Vec<AnalysisOp>) -> Self {
-        Self { span, ops }
+    pub fn new(id: AnalysisBodyId, span: SourceSpan, ops: Vec<AnalysisOp>) -> Self {
+        Self { id, span, ops }
+    }
+
+    /// Return the identifier assigned to this body.
+    pub fn id(&self) -> AnalysisBodyId {
+        self.id
     }
 
     /// Return the source span of this body.
@@ -70,6 +98,14 @@ impl AnalysisBody {
         self.ops.is_empty()
     }
 }
+
+impl PartialEq for AnalysisBody {
+    fn eq(&self, other: &Self) -> bool {
+        self.span == other.span && self.ops == other.ops
+    }
+}
+
+impl Eq for AnalysisBody {}
 
 /// A normalized MASM operation exposed by an analysis frontend.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,7 +160,7 @@ pub struct AnalysisInstruction {
 
 impl AnalysisInstruction {
     /// Create a normalized instruction with optional invocation and local-access metadata.
-    pub fn new(
+    pub(crate) fn new(
         span: SourceSpan,
         instruction: Instruction,
         invocation: Option<AnalysisInvocation>,
@@ -160,8 +196,10 @@ impl AnalysisInstruction {
 }
 
 /// A normalized call-like instruction target.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct AnalysisInvocation {
+    id: AnalysisInvocationId,
+    body_id: AnalysisBodyId,
     kind: AnalysisInvocationKind,
     target: AnalysisInvocationTarget,
     span: SourceSpan,
@@ -170,15 +208,32 @@ pub struct AnalysisInvocation {
 impl AnalysisInvocation {
     /// Create normalized invocation metadata.
     pub fn new(
+        id: AnalysisInvocationId,
+        body_id: AnalysisBodyId,
         kind: AnalysisInvocationKind,
         target: AnalysisInvocationTarget,
         span: SourceSpan,
     ) -> Self {
         Self {
+            id,
+            body_id,
             kind,
             target,
             span,
         }
+    }
+
+    /// Return the stable call-site identity of this invocation within its procedure body.
+    ///
+    /// Phase 1 uses this identifier to attach per-call-site summary application state without
+    /// relying on source spans as lookup keys.
+    pub fn id(&self) -> AnalysisInvocationId {
+        self.id
+    }
+
+    /// Return the owning body identifier of this invocation.
+    pub fn body_id(&self) -> AnalysisBodyId {
+        self.body_id
     }
 
     /// Return the invocation kind.
@@ -197,22 +252,68 @@ impl AnalysisInvocation {
     }
 }
 
+impl PartialEq for AnalysisInvocation {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.target == other.target && self.span == other.span
+    }
+}
+
+impl Eq for AnalysisInvocation {}
+
+/// Stable identity of one normalized invocation site within a procedure body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AnalysisInvocationId(usize);
+
+impl AnalysisInvocationId {
+    /// Create an invocation identifier from its per-procedure ordinal.
+    pub fn new(ordinal: usize) -> Self {
+        Self(ordinal)
+    }
+
+    /// Return the per-procedure ordinal of this invocation site.
+    pub fn ordinal(self) -> usize {
+        self.0
+    }
+}
+
 /// A precisely resolved invocation reported by a richer frontend backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedInvocation {
-    span: SourceSpan,
+    id: AnalysisInvocationId,
     summary_key: SummaryKey,
+    span: SourceSpan,
+    body_id: AnalysisBodyId,
 }
 
 impl ResolvedInvocation {
     /// Create a precise resolved invocation entry.
-    pub(crate) fn new(span: SourceSpan, summary_key: SummaryKey) -> Self {
-        Self { span, summary_key }
+    pub(crate) fn new(
+        id: AnalysisInvocationId,
+        body_id: AnalysisBodyId,
+        span: SourceSpan,
+        summary_key: SummaryKey,
+    ) -> Self {
+        Self {
+            id,
+            span,
+            summary_key,
+            body_id,
+        }
+    }
+
+    /// Return the invocation identifier covered by this precise resolution.
+    pub(crate) fn id(&self) -> AnalysisInvocationId {
+        self.id
     }
 
     /// Return the invocation span covered by this precise resolution.
     pub(crate) fn span(&self) -> SourceSpan {
         self.span
+    }
+
+    /// Return the owning body identifier covered by this precise resolution.
+    pub(crate) fn body_id(&self) -> AnalysisBodyId {
+        self.body_id
     }
 
     /// Return the resolved callee summary key.
@@ -321,13 +422,41 @@ pub(crate) fn build_body(
     block: &Block,
 ) -> AnalysisBody {
     let resolver = module.resolver(source_manager);
-    AnalysisBody::new(
-        block.span(),
-        block.iter().map(|op| build_op(module, &resolver, op)).collect(),
+    let mut next_invocation_ordinal = 0usize;
+    let body_id = AnalysisBodyId::new();
+    build_body_with_counter(
+        module,
+        &resolver,
+        block,
+        &mut next_invocation_ordinal,
+        body_id,
     )
 }
 
-fn build_op(module: &Module, resolver: &LocalSymbolResolver, op: &Op) -> AnalysisOp {
+fn build_body_with_counter(
+    module: &Module,
+    resolver: &LocalSymbolResolver,
+    block: &Block,
+    next_invocation_ordinal: &mut usize,
+    body_id: AnalysisBodyId,
+) -> AnalysisBody {
+    AnalysisBody::new(
+        body_id,
+        block.span(),
+        block
+            .iter()
+            .map(|op| build_op(module, resolver, op, next_invocation_ordinal, body_id))
+            .collect(),
+    )
+}
+
+fn build_op(
+    module: &Module,
+    resolver: &LocalSymbolResolver,
+    op: &Op,
+    next_invocation_ordinal: &mut usize,
+    body_id: AnalysisBodyId,
+) -> AnalysisOp {
     match op {
         Op::If {
             span,
@@ -335,19 +464,37 @@ fn build_op(module: &Module, resolver: &LocalSymbolResolver, op: &Op) -> Analysi
             else_blk,
         } => AnalysisOp::If {
             span: *span,
-            then_body: build_body(module, resolver.source_manager(), then_blk),
-            else_body: build_body(module, resolver.source_manager(), else_blk),
+            then_body: build_body_with_counter(
+                module,
+                resolver,
+                then_blk,
+                next_invocation_ordinal,
+                body_id,
+            ),
+            else_body: build_body_with_counter(
+                module,
+                resolver,
+                else_blk,
+                next_invocation_ordinal,
+                body_id,
+            ),
         },
         Op::While { span, body } => AnalysisOp::While {
             span: *span,
-            body: build_body(module, resolver.source_manager(), body),
+            body: build_body_with_counter(module, resolver, body, next_invocation_ordinal, body_id),
         },
         Op::Repeat { span, count, body } => AnalysisOp::Repeat {
             span: *span,
             count: count.clone(),
-            body: build_body(module, resolver.source_manager(), body),
+            body: build_body_with_counter(module, resolver, body, next_invocation_ordinal, body_id),
         },
-        Op::Inst(instruction) => AnalysisOp::Inst(build_instruction(module, resolver, instruction)),
+        Op::Inst(instruction) => AnalysisOp::Inst(build_instruction(
+            module,
+            resolver,
+            instruction,
+            next_invocation_ordinal,
+            body_id,
+        )),
     }
 }
 
@@ -355,11 +502,19 @@ fn build_instruction(
     module: &Module,
     resolver: &LocalSymbolResolver,
     instruction: &Span<Instruction>,
+    next_invocation_ordinal: &mut usize,
+    body_id: AnalysisBodyId,
 ) -> AnalysisInstruction {
     AnalysisInstruction::new(
         instruction.span(),
         instruction.inner().clone(),
-        classify_invocation(module, resolver, instruction),
+        classify_invocation(
+            module,
+            resolver,
+            instruction,
+            next_invocation_ordinal,
+            body_id,
+        ),
         classify_local_access(instruction),
     )
 }
@@ -368,6 +523,8 @@ fn classify_invocation(
     _module: &Module,
     _resolver: &LocalSymbolResolver,
     instruction: &Span<Instruction>,
+    next_invocation_ordinal: &mut usize,
+    body_id: AnalysisBodyId,
 ) -> Option<AnalysisInvocation> {
     let (kind, target) = match instruction.inner() {
         Instruction::Exec(target) => (AnalysisInvocationKind::Exec, target),
@@ -376,8 +533,12 @@ fn classify_invocation(
         Instruction::ProcRef(target) => (AnalysisInvocationKind::ProcRef, target),
         _ => return None,
     };
+    let id = AnalysisInvocationId::new(*next_invocation_ordinal);
+    *next_invocation_ordinal += 1;
 
     Some(AnalysisInvocation::new(
+        id,
+        body_id,
         kind,
         invocation_target(target),
         target.span(),
@@ -391,10 +552,20 @@ pub(crate) fn collect_precise_invocations(
     source_manager: Arc<dyn SourceManager>,
     block: &Block,
     known_targets: &KnownTargets,
+    body_id: AnalysisBodyId,
 ) -> Vec<ResolvedInvocation> {
     let resolver = module.resolver(source_manager);
     let mut resolved = Vec::new();
-    collect_block_precise_invocations(module, &resolver, block, known_targets, &mut resolved);
+    let mut next_invocation_ordinal = 0usize;
+    collect_block_precise_invocations(
+        module,
+        &resolver,
+        block,
+        known_targets,
+        &mut next_invocation_ordinal,
+        body_id,
+        &mut resolved,
+    );
     resolved
 }
 
@@ -427,13 +598,7 @@ fn resolve_invocation_target(
             let target_text = path.to_string();
             match resolver.resolve_path(path.as_deref()) {
                 Ok(resolution) => {
-                    resolved_summary_key(
-                        module,
-                        &target_text,
-                        resolution,
-                        false,
-                        known_targets,
-                    )
+                    resolved_summary_key(module, &target_text, resolution, false, known_targets)
                 }
                 Err(SymbolResolutionError::UndefinedSymbol { .. }) => {
                     Some(summary_key_for_path(&target_text))
@@ -449,6 +614,8 @@ fn collect_block_precise_invocations(
     resolver: &LocalSymbolResolver,
     block: &Block,
     known_targets: &KnownTargets,
+    next_invocation_ordinal: &mut usize,
+    body_id: AnalysisBodyId,
     resolved: &mut Vec<ResolvedInvocation>,
 ) {
     for op in block.iter() {
@@ -461,6 +628,8 @@ fn collect_block_precise_invocations(
                     resolver,
                     then_blk,
                     known_targets,
+                    next_invocation_ordinal,
+                    body_id,
                     resolved,
                 );
                 collect_block_precise_invocations(
@@ -468,17 +637,29 @@ fn collect_block_precise_invocations(
                     resolver,
                     else_blk,
                     known_targets,
+                    next_invocation_ordinal,
+                    body_id,
                     resolved,
                 );
             }
             Op::While { body, .. } | Op::Repeat { body, .. } => {
-                collect_block_precise_invocations(module, resolver, body, known_targets, resolved);
+                collect_block_precise_invocations(
+                    module,
+                    resolver,
+                    body,
+                    known_targets,
+                    next_invocation_ordinal,
+                    body_id,
+                    resolved,
+                );
             }
             Op::Inst(instruction) => collect_instruction_precise_invocation(
                 module,
                 resolver,
                 instruction,
                 known_targets,
+                next_invocation_ordinal,
+                body_id,
                 resolved,
             ),
         }
@@ -490,6 +671,8 @@ fn collect_instruction_precise_invocation(
     resolver: &LocalSymbolResolver,
     instruction: &Span<Instruction>,
     known_targets: &KnownTargets,
+    next_invocation_ordinal: &mut usize,
+    body_id: AnalysisBodyId,
     resolved: &mut Vec<ResolvedInvocation>,
 ) {
     let target = match instruction.inner() {
@@ -500,8 +683,16 @@ fn collect_instruction_precise_invocation(
         _ => return,
     };
 
+    let id = AnalysisInvocationId::new(*next_invocation_ordinal);
+    *next_invocation_ordinal += 1;
+
     if let Some(summary_key) = resolve_invocation_target(module, resolver, target, known_targets) {
-        resolved.push(ResolvedInvocation::new(target.span(), summary_key));
+        resolved.push(ResolvedInvocation::new(
+            id,
+            body_id,
+            target.span(),
+            summary_key,
+        ));
     }
 }
 
@@ -647,8 +838,7 @@ mod tests {
         let workspace =
             workspace_from_modules(&[("math::word_ops", "proc foo\n    push.1\nend\n")]);
         let module = workspace.modules().next().expect("module").module();
-        let resolution =
-            SymbolResolution::Local(Span::new(SourceSpan::UNKNOWN, ItemIndex::new(0)));
+        let resolution = SymbolResolution::Local(Span::new(SourceSpan::UNKNOWN, ItemIndex::new(0)));
         let known_targets = KnownTargets::new(HashSet::new(), HashSet::new());
 
         assert!(
@@ -705,9 +895,7 @@ mod tests {
         let workspace = workspace_from_modules(modules);
         let module = workspace
             .modules()
-            .find(|program| {
-                <Path as AsRef<str>>::as_ref(program.module().path()) == "app::main"
-            })
+            .find(|program| <Path as AsRef<str>>::as_ref(program.module().path()) == "app::main")
             .expect("main")
             .module();
         let path_buf =
