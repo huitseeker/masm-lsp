@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use miden_debug_types::SourceSpan;
 
-use crate::SymbolPath;
+use crate::{abstract_interp::SummaryStatus, SymbolPath};
 
 use super::domain::AdviceFact;
 
@@ -27,7 +27,7 @@ impl AdviceSummary {
     }
 
     /// Create an opaque summary with explicit output arity.
-    pub fn unknown_with_arity(outputs: usize) -> Self {
+    pub fn opaque_with_arity(outputs: usize) -> Self {
         Self {
             outputs: vec![AdviceFact::bottom(); outputs],
             unknown: true,
@@ -35,13 +35,47 @@ impl AdviceSummary {
     }
 
     /// Return an opaque summary without arity information.
-    pub fn unknown() -> Self {
-        Self::unknown_with_arity(0)
+    pub fn opaque() -> Self {
+        Self::opaque_with_arity(0)
     }
 
-    /// Return true if the summary is opaque.
+    /// Create an opaque summary with explicit output arity.
+    pub fn unknown_with_arity(outputs: usize) -> Self {
+        Self::opaque_with_arity(outputs)
+    }
+
+    /// Return an opaque summary without arity information.
+    pub fn unknown() -> Self {
+        Self::opaque()
+    }
+
+    /// Return the summary precision status.
+    pub fn status(&self) -> SummaryStatus {
+        if self.unknown {
+            SummaryStatus::Opaque
+        } else {
+            SummaryStatus::Known
+        }
+    }
+
+    /// Return `true` when the summary is opaque.
+    pub fn is_opaque(&self) -> bool {
+        self.unknown
+    }
+
+    /// Return `true` when the summary is opaque.
     pub fn is_unknown(&self) -> bool {
         self.unknown
+    }
+
+    /// Return the per-output unconstrained-advice provenance.
+    pub fn outputs(&self) -> &[AdviceFact] {
+        &self.outputs
+    }
+
+    /// Return the number of summarized outputs.
+    pub fn output_count(&self) -> usize {
+        self.outputs.len()
     }
 }
 

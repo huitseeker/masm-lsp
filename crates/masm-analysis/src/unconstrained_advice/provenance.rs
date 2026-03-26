@@ -25,7 +25,7 @@ pub(crate) fn analyze_proc_provenance(
     let env = seed_input_env(input_count);
     let result = eval_block(stmts, env, callee_summaries);
     if result.opaque {
-        AdviceSummary::unknown_with_arity(output_count)
+        AdviceSummary::opaque_with_arity(output_count)
     } else {
         build_summary(stmts, output_count, &result.env)
     }
@@ -250,7 +250,7 @@ pub(crate) fn assign_call_results(
         }
         return;
     };
-    if summary.is_unknown() {
+    if summary.is_opaque() {
         for result in results {
             env.set_var_fact(result, super::domain::AdviceFact::bottom());
             env.clear_var_metadata(result);
@@ -262,11 +262,11 @@ pub(crate) fn assign_call_results(
         .iter()
         .map(|arg| env.fact_for_var(arg))
         .collect::<Vec<_>>();
-    for (result, summary_fact) in results.iter().zip(summary.outputs.iter()) {
+    for (result, summary_fact) in results.iter().zip(summary.outputs().iter()) {
         env.set_var_fact(result, substitute_output_fact(summary_fact, &arg_facts));
         env.clear_var_metadata(result);
     }
-    for result in results.iter().skip(summary.outputs.len()) {
+    for result in results.iter().skip(summary.output_count()) {
         env.set_var_fact(result, super::domain::AdviceFact::bottom());
         env.clear_var_metadata(result);
     }

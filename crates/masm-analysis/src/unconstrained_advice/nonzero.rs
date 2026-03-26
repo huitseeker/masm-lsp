@@ -18,36 +18,43 @@ use super::{
     },
     summary::{AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummaryMap},
 };
+use crate::abstract_interp::Summary;
 
 /// Summary of non-zero sink requirements for one procedure.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NonZeroSummary {
-    /// Input positions that may reach a `div` or `inv` sink without a local proof.
-    pub(crate) required_inputs: BTreeSet<usize>,
-    /// Whether this summary is opaque.
-    pub(crate) unknown: bool,
+    summary: Summary<BTreeSet<usize>>,
 }
 
 impl NonZeroSummary {
     /// Create a known summary from required input positions.
     pub(crate) fn new(required_inputs: BTreeSet<usize>) -> Self {
         Self {
-            required_inputs,
-            unknown: false,
+            summary: Summary::known(required_inputs),
         }
     }
 
     /// Create an opaque summary.
-    pub(crate) fn unknown() -> Self {
+    pub(crate) fn opaque() -> Self {
         Self {
-            required_inputs: BTreeSet::new(),
-            unknown: true,
+            summary: Summary::opaque(BTreeSet::new()),
         }
     }
 
     /// Return true if the summary is opaque.
-    pub(crate) fn is_unknown(&self) -> bool {
-        self.unknown
+    pub(crate) fn is_opaque(&self) -> bool {
+        self.summary.is_opaque()
+    }
+
+    /// Return the required input positions captured by this summary.
+    pub(crate) fn required_inputs(&self) -> &BTreeSet<usize> {
+        self.summary.value()
+    }
+}
+
+impl Default for NonZeroSummary {
+    fn default() -> Self {
+        Self::opaque()
     }
 }
 
@@ -65,11 +72,11 @@ pub(crate) fn infer_nonzero_summaries_and_diagnostics(
 
     for node in callgraph.iter() {
         let Some(proc) = prepared.get(&node.name) else {
-            summaries.insert(node.name.clone(), NonZeroSummary::unknown());
+            summaries.insert(node.name.clone(), NonZeroSummary::opaque());
             continue;
         };
         let Some(stmts) = proc.stmts.as_deref() else {
-            summaries.insert(node.name.clone(), NonZeroSummary::unknown());
+            summaries.insert(node.name.clone(), NonZeroSummary::opaque());
             continue;
         };
 
@@ -127,7 +134,7 @@ impl<'a> ProcNonZeroAnalyzer<'a> {
         let env = seed_input_env(input_count);
         let result = self.eval_block(stmts, env);
         let summary = if result.opaque {
-            NonZeroSummary::unknown()
+            NonZeroSummary::opaque()
         } else {
             NonZeroSummary::new(result.required_inputs)
         };
@@ -413,13 +420,13 @@ impl<'a> ProcNonZeroAnalyzer<'a> {
         else {
             return CallResult::default();
         };
-        if summary.is_unknown() {
+        if summary.is_opaque() {
             return CallResult::default();
         }
 
         let mut diagnostics = Vec::new();
         let mut required_inputs = BTreeSet::new();
-        for index in &summary.required_inputs {
+        for index in summary.required_inputs() {
             let Some(arg) = args.get(*index) else {
                 continue;
             };

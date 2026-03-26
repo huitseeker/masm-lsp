@@ -3,6 +3,10 @@
 //! This module is intentionally small and explicit. Phase 1 starts by making the abstract
 //! interpretation loop visible in code before porting existing analyses onto it.
 
+mod summary;
+
+pub use summary::{Summary, SummaryStatus};
+
 /// Join-based abstract state used by the fixpoint engine.
 ///
 /// Implementations should model a monotone abstract domain where `join_assign` updates `self` to

@@ -149,12 +149,12 @@ fn infer_provenance_summaries(
 
     for node in callgraph.iter() {
         let Some(proc) = prepared.get(&node.name) else {
-            summaries.insert(node.name.clone(), AdviceSummary::unknown());
+            summaries.insert(node.name.clone(), AdviceSummary::opaque());
             continue;
         };
         let summary = match proc.stmts.as_deref() {
             Some(stmts) => analyze_proc_provenance(proc.inputs, proc.outputs, stmts, &summaries),
-            None => AdviceSummary::unknown_with_arity(proc.outputs),
+            None => AdviceSummary::opaque_with_arity(proc.outputs),
         };
         summaries.insert(node.name.clone(), summary);
     }
