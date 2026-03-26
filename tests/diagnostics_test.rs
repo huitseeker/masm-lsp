@@ -319,6 +319,30 @@ end
 }
 
 #[tokio::test]
+async fn u32assert_does_not_suppress_nonzero_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc bad
+    adv_push.1
+    u32assert
+    inv
+end
+"#;
+    let uri = harness.open_inline("advice_u32assert_inv.masm", content).await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warning =
+        analysis_warning_containing(&diags, "divisor or `inv` input")
+            .expect("expected non-zero warning to survive u32assert");
+    assert_eq!(
+        warning.source.as_deref(),
+        Some(SOURCE_ANALYSIS),
+        "expected analysis diagnostic, got: {warning:?}"
+    );
+}
+
+#[tokio::test]
 async fn direct_u32_intrinsic_sink_produces_warning() {
     let harness = TestHarness::new().await;
     let content = r#"proc bad
@@ -395,6 +419,102 @@ end
             .message
             .contains("Unconstrained advice reaches a u32 operation")),
         "expected interprocedural unconstrained-advice warning, got: {:?}",
+        warnings
+    );
+}
+
+#[tokio::test]
+async fn interprocedural_u32assert_suppresses_follow_on_u32_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc sanitize
+    u32assert
+end
+
+proc caller
+    adv_push.1
+    exec.sanitize
+    push.1
+    u32wrapping_add
+end
+"#;
+    let uri = harness
+        .open_inline("advice_interproc_u32assert.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warnings = analysis_warnings(&diags);
+    assert!(
+        warnings.iter().all(|diag| !diag
+            .message
+            .contains("Unconstrained advice reaches a u32 operation")),
+        "expected no downstream u32 warning after interprocedural u32assert, got: {:?}",
+        warnings
+    );
+}
+
+#[tokio::test]
+async fn interprocedural_transformation_does_not_inherit_u32_proof() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc transform
+    u32assert
+    inv
+end
+
+proc caller
+    adv_push.1
+    exec.transform
+    push.1
+    u32wrapping_add
+end
+"#;
+    let uri = harness
+        .open_inline("advice_interproc_transform.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warning =
+        analysis_warning_containing(&diags, "Unconstrained advice reaches a u32 operation")
+            .expect("expected transformed output to keep the downstream u32 warning");
+    assert_eq!(
+        warning.source.as_deref(),
+        Some(SOURCE_ANALYSIS),
+        "expected analysis diagnostic, got: {warning:?}"
+    );
+}
+
+#[tokio::test]
+async fn interprocedural_passthrough_preserves_caller_u32_proof() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc forward
+    dup.0
+    drop
+end
+
+proc caller
+    adv_push.1
+    u32assert
+    exec.forward
+    push.1
+    u32wrapping_add
+end
+"#;
+    let uri = harness
+        .open_inline("advice_interproc_forward.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warnings = analysis_warnings(&diags);
+    assert!(
+        warnings.iter().all(|diag| !diag
+            .message
+            .contains("Unconstrained advice reaches a u32 operation")),
+        "expected passthrough helper to preserve the caller's u32 proof, got: {:?}",
         warnings
     );
 }

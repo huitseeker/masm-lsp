@@ -19,10 +19,10 @@ pub mod abstract_interp;
 pub mod analysis_frontend;
 mod unconstrained_advice;
 
+pub use unconstrained_advice::infer_unconstrained_advice;
 pub use unconstrained_advice::{
-    infer_unconstrained_advice, infer_unconstrained_advice_in_workspace, AdviceDiagnostic,
-    AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummary, AdviceSummaryMap,
-    CallArgumentRequirement,
+    infer_unconstrained_advice_in_workspace, AdviceDiagnostic, AdviceDiagnosticsMap,
+    AdviceSinkKind, AdviceSummary, AdviceSummaryMap, CallArgumentRequirement, U32Validity,
 };
 
 pub use masm_decompiler::signature::SignatureMap;

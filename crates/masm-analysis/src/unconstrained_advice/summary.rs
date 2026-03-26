@@ -4,15 +4,21 @@ use std::collections::HashMap;
 
 use miden_debug_types::SourceSpan;
 
-use crate::{abstract_interp::SummaryStatus, SymbolPath};
+use crate::SymbolPath;
 
-use super::domain::AdviceFact;
+use super::{domain::AdviceFact, u32_domain::U32Validity};
 
 /// Summary of unconstrained-advice flow for one procedure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdviceSummary {
     /// Per-output unconstrained-advice provenance.
     pub outputs: Vec<AdviceFact>,
+    /// Per-output `u32` validity.
+    pub(crate) u32_outputs: Vec<U32Validity>,
+    /// Exact input-position forwarding for each output, when known.
+    pub(crate) forwarded_inputs: Vec<Option<usize>>,
+    /// Per-input `u32` postconditions guaranteed after the call returns.
+    pub(crate) u32_inputs: Vec<U32Validity>,
     /// Whether this summary is opaque.
     pub unknown: bool,
 }
@@ -20,8 +26,45 @@ pub struct AdviceSummary {
 impl AdviceSummary {
     /// Create a known summary.
     pub fn new(outputs: Vec<AdviceFact>) -> Self {
+        let output_count = outputs.len();
         Self {
             outputs,
+            u32_outputs: vec![U32Validity::Unknown; output_count],
+            forwarded_inputs: vec![None; output_count],
+            u32_inputs: Vec::new(),
+            unknown: false,
+        }
+    }
+
+    /// Create a known summary with explicit `u32` validity for each output.
+    pub fn with_u32_outputs(outputs: Vec<AdviceFact>, u32_outputs: Vec<U32Validity>) -> Self {
+        Self::with_u32_postconditions(outputs, u32_outputs, Vec::new())
+    }
+
+    /// Create a known summary with explicit `u32` postconditions.
+    pub fn with_u32_postconditions(
+        outputs: Vec<AdviceFact>,
+        u32_outputs: Vec<U32Validity>,
+        u32_inputs: Vec<U32Validity>,
+    ) -> Self {
+        let output_count = outputs.len();
+        Self::with_forwarding(outputs, u32_outputs, vec![None; output_count], u32_inputs)
+    }
+
+    /// Create a known summary with explicit exact-forwarding metadata.
+    pub fn with_forwarding(
+        outputs: Vec<AdviceFact>,
+        u32_outputs: Vec<U32Validity>,
+        forwarded_inputs: Vec<Option<usize>>,
+        u32_inputs: Vec<U32Validity>,
+    ) -> Self {
+        debug_assert_eq!(outputs.len(), u32_outputs.len());
+        debug_assert_eq!(outputs.len(), forwarded_inputs.len());
+        Self {
+            outputs,
+            u32_outputs,
+            forwarded_inputs,
+            u32_inputs,
             unknown: false,
         }
     }
@@ -30,6 +73,9 @@ impl AdviceSummary {
     pub fn opaque_with_arity(outputs: usize) -> Self {
         Self {
             outputs: vec![AdviceFact::bottom(); outputs],
+            u32_outputs: vec![U32Validity::Unknown; outputs],
+            forwarded_inputs: vec![None; outputs],
+            u32_inputs: Vec::new(),
             unknown: true,
         }
     }
@@ -39,23 +85,9 @@ impl AdviceSummary {
         Self::opaque_with_arity(0)
     }
 
-    /// Create an opaque summary with explicit output arity.
-    pub fn unknown_with_arity(outputs: usize) -> Self {
-        Self::opaque_with_arity(outputs)
-    }
-
     /// Return an opaque summary without arity information.
     pub fn unknown() -> Self {
         Self::opaque()
-    }
-
-    /// Return the summary precision status.
-    pub fn status(&self) -> SummaryStatus {
-        if self.unknown {
-            SummaryStatus::Opaque
-        } else {
-            SummaryStatus::Known
-        }
     }
 
     /// Return `true` when the summary is opaque.
@@ -71,6 +103,21 @@ impl AdviceSummary {
     /// Return the per-output unconstrained-advice provenance.
     pub fn outputs(&self) -> &[AdviceFact] {
         &self.outputs
+    }
+
+    /// Return the per-output `u32` validity.
+    pub fn u32_outputs(&self) -> &[U32Validity] {
+        &self.u32_outputs
+    }
+
+    /// Return the exact-forwarding metadata for each output.
+    pub fn forwarded_inputs(&self) -> &[Option<usize>] {
+        &self.forwarded_inputs
+    }
+
+    /// Return the per-input `u32` postconditions.
+    pub fn u32_inputs(&self) -> &[U32Validity] {
+        &self.u32_inputs
     }
 
     /// Return the number of summarized outputs.

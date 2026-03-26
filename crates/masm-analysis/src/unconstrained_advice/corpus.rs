@@ -7,7 +7,7 @@ use miden_debug_types::SourceManager;
 
 use crate::{
     infer_unconstrained_advice_in_workspace,
-    unconstrained_advice::{AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummaryMap},
+    unconstrained_advice::{summary::AdviceSummaryMap, AdviceDiagnosticsMap, AdviceSinkKind},
     SymbolPath,
 };
 

@@ -427,6 +427,21 @@ fn u32assert_sanitizes_mem_store_address() {
 }
 
 #[test]
+fn u32assert_on_an_alias_sanitizes_mem_store_address() {
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc ok\n    adv_push.1\n    dup.0\n    u32assert\n    push.42\n    swap\n    mem_store\n    drop\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+    let ok = diagnostics_for(&diagnostics, "advice::ok");
+    assert!(
+        ok.iter()
+            .all(|diag| !diag.message.contains("memory address")),
+        "expected no memory address diagnostics after validating an aliased address, got: {ok:?}"
+    );
+}
+
+#[test]
 fn adv_pipe_tainted_address_warns() {
     let ws = workspace_from_modules(&[(
         "advice",
@@ -484,6 +499,30 @@ fn interprocedural_advice_to_address_warns() {
             .iter()
             .any(|diag| diag.message.contains("memory address")),
         "expected interprocedural memory address diagnostic, got: {caller:?}"
+    );
+}
+
+#[test]
+fn interprocedural_u32assert_sanitizes_mem_load_address() {
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc sanitize\n    u32assert\nend\n\nproc caller\n    adv_push.1\n    exec.sanitize\n    mem_load\nend\n",
+    )]);
+    let (summaries, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+    let sanitize = summaries
+        .get(&crate::SymbolPath::new("advice::sanitize".to_string()))
+        .expect("expected sanitize summary");
+    assert_eq!(
+        sanitize.u32_inputs.first().copied(),
+        Some(super::u32_domain::U32Validity::ProvenU32),
+        "expected sanitize summary to preserve a proven-u32 input postcondition, got: {sanitize:?}"
+    );
+    let caller = diagnostics_for(&diagnostics, "advice::caller");
+    assert!(
+        caller
+            .iter()
+            .all(|diag| !diag.message.contains("memory address")),
+        "expected no interprocedural memory address diagnostic after u32assert, got: {caller:?}"
     );
 }
 

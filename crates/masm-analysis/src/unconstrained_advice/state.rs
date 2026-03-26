@@ -9,7 +9,7 @@ use masm_decompiler::{
 
 use crate::abstract_interp::JoinSemiLattice;
 
-use super::domain::AdviceFact;
+use super::{domain::AdviceFact, u32_domain::U32Validity};
 
 /// Analysis-visible storage location tracked by the unconstrained-advice state.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -43,6 +43,8 @@ pub(crate) struct EqZeroWitness {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct AdviceState {
     facts: HashMap<AdvicePlace, AdviceFact>,
+    u32_validity: HashMap<AdvicePlace, U32Validity>,
+    u32_valid_identities: HashSet<VarKey>,
     aliases: HashMap<VarKey, VarKey>,
     local_aliases: HashMap<u32, VarKey>,
     zero_tests: HashMap<VarKey, EqZeroWitness>,
@@ -51,6 +53,64 @@ pub(crate) struct AdviceState {
 }
 
 impl AdviceState {
+    /// Return the alias identity currently attached to a tracked place, if any.
+    fn identity_for_place(&self, place: &AdvicePlace) -> Option<VarKey> {
+        match place {
+            AdvicePlace::Var(key) => Some(self.aliases.get(key).cloned().unwrap_or_else(|| key.clone())),
+            AdvicePlace::Local(slot) => self.local_aliases.get(slot).cloned(),
+        }
+    }
+
+    /// Return all currently tracked places that alias the given runtime value.
+    fn aliased_places(&self, identity: &VarKey) -> HashSet<AdvicePlace> {
+        self.facts
+            .keys()
+            .cloned()
+            .chain(self.u32_validity.keys().cloned())
+            .chain(self.aliases.keys().cloned().map(AdvicePlace::Var))
+            .chain(self.local_aliases.keys().copied().map(AdvicePlace::Local))
+            .filter(|place| self.identity_for_place(place).as_ref() == Some(identity))
+            .collect()
+    }
+
+    /// Set a `u32` validity fact for every currently tracked alias of the identity.
+    fn set_identity_u32_validity(&mut self, identity: &VarKey, validity: U32Validity) {
+        for place in self.aliased_places(identity) {
+            self.set_place_u32_validity(place, validity);
+        }
+        if validity.is_proven() {
+            self.u32_valid_identities.insert(identity.clone());
+        } else {
+            self.u32_valid_identities.remove(identity);
+        }
+    }
+
+    /// Refresh the cached proof bit for one alias identity after a state mutation.
+    fn refresh_u32_identity_cache(&mut self, identity: &VarKey) {
+        if self
+            .aliased_places(identity)
+            .iter()
+            .any(|place| self.u32_validity.get(place).copied().unwrap_or(U32Validity::Unknown).is_proven())
+        {
+            self.u32_valid_identities.insert(identity.clone());
+        } else {
+            self.u32_valid_identities.remove(identity);
+        }
+    }
+
+    /// Rebuild the alias-identity cache from the current place-level facts.
+    fn rebuild_u32_identity_cache(&mut self) {
+        self.u32_valid_identities.clear();
+        let identities = self
+            .u32_validity
+            .keys()
+            .filter_map(|place| self.identity_for_place(place))
+            .collect::<HashSet<_>>();
+        for identity in identities {
+            self.refresh_u32_identity_cache(&identity);
+        }
+    }
+
     /// Read the current fact for a tracked place.
     pub(crate) fn fact_for_place(&self, place: &AdvicePlace) -> AdviceFact {
         self.facts
@@ -61,7 +121,41 @@ impl AdviceState {
 
     /// Set the current fact for a tracked place.
     pub(crate) fn set_place_fact(&mut self, place: AdvicePlace, fact: AdviceFact) {
+        let identity = self.identity_for_place(&place);
+        self.u32_validity.remove(&place);
+        if let Some(identity) = identity {
+            self.refresh_u32_identity_cache(&identity);
+        }
         self.facts.insert(place, fact);
+    }
+
+    /// Set the current `u32` validity fact for a tracked place.
+    pub(crate) fn set_place_u32_validity(&mut self, place: AdvicePlace, validity: U32Validity) {
+        let identity = self.identity_for_place(&place);
+        if validity.is_proven() {
+            self.u32_validity.insert(place, validity);
+        } else {
+            self.u32_validity.remove(&place);
+        }
+        if let Some(identity) = identity {
+            self.refresh_u32_identity_cache(&identity);
+        }
+    }
+
+    /// Read the current `u32` validity fact for a tracked place.
+    pub(crate) fn u32_validity_for_place(&self, place: &AdvicePlace) -> U32Validity {
+        let direct = self
+            .u32_validity
+            .get(place)
+            .copied()
+            .unwrap_or(U32Validity::Unknown);
+        if direct.is_proven() {
+            return direct;
+        }
+        self.identity_for_place(place)
+            .filter(|identity| self.u32_valid_identities.contains(identity))
+            .map(|_| U32Validity::ProvenU32)
+            .unwrap_or(U32Validity::Unknown)
     }
 
     /// Read the current fact for a variable.
@@ -72,6 +166,16 @@ impl AdviceState {
     /// Set the current fact for a variable.
     pub(crate) fn set_var_fact(&mut self, var: &Var, fact: AdviceFact) {
         self.set_place_fact(AdvicePlace::var(var), fact);
+    }
+
+    /// Read the current `u32` validity fact for a variable.
+    pub(crate) fn u32_validity_for_var(&self, var: &Var) -> U32Validity {
+        self.u32_validity_for_place(&AdvicePlace::var(var))
+    }
+
+    /// Set the current `u32` validity fact for a variable.
+    pub(crate) fn set_var_u32_validity(&mut self, var: &Var, validity: U32Validity) {
+        self.set_place_u32_validity(AdvicePlace::var(var), validity);
     }
 
     /// Return the alias identity for a variable.
@@ -88,20 +192,27 @@ impl AdviceState {
     /// Set the alias identity for a variable.
     pub(crate) fn set_var_identity(&mut self, var: &Var, identity: VarKey) {
         let key = VarKey::from_var(var);
+        let old_identity = self.identity_for_var(var);
         if identity == key {
             self.aliases.remove(&key);
         } else {
             self.aliases.insert(key, identity);
         }
+        self.refresh_u32_identity_cache(&old_identity);
+        self.refresh_u32_identity_cache(&self.identity_for_var(var));
     }
 
     /// Clear any alias identity for a variable.
     pub(crate) fn clear_var_identity(&mut self, var: &Var) {
+        let old_identity = self.identity_for_var(var);
         self.aliases.remove(&VarKey::from_var(var));
+        self.refresh_u32_identity_cache(&old_identity);
+        self.refresh_u32_identity_cache(&self.identity_for_var(var));
     }
 
     /// Set the alias identity for a local slot.
     pub(crate) fn set_local_identity(&mut self, slot: u32, identity: Option<VarKey>) {
+        let old_identity = self.identity_for_local(slot);
         match identity {
             Some(identity) => {
                 self.local_aliases.insert(slot, identity);
@@ -109,6 +220,12 @@ impl AdviceState {
             None => {
                 self.local_aliases.remove(&slot);
             }
+        }
+        if let Some(identity) = old_identity {
+            self.refresh_u32_identity_cache(&identity);
+        }
+        if let Some(identity) = self.identity_for_local(slot) {
+            self.refresh_u32_identity_cache(&identity);
         }
     }
 
@@ -165,7 +282,8 @@ impl AdviceState {
 
     /// Sanitize a variable from this point onward.
     pub(crate) fn sanitize_var(&mut self, var: &Var) {
-        self.set_var_fact(var, AdviceFact::bottom());
+        let identity = self.identity_for_var(var);
+        self.set_identity_u32_validity(&identity, U32Validity::ProvenU32);
     }
 
     /// Read the current fact for a local slot.
@@ -173,9 +291,25 @@ impl AdviceState {
         self.fact_for_place(&AdvicePlace::local(slot))
     }
 
+    /// Read the current `u32` validity fact for a local slot.
+    pub(crate) fn u32_validity_for_local(&self, slot: u32) -> U32Validity {
+        self.u32_validity_for_place(&AdvicePlace::local(slot))
+    }
+
     /// Set the current fact for a local slot.
     pub(crate) fn set_local_fact(&mut self, slot: u32, fact: AdviceFact) {
         self.set_place_fact(AdvicePlace::local(slot), fact);
+    }
+
+    /// Set the current `u32` validity fact for a local slot.
+    pub(crate) fn set_local_u32_validity(&mut self, slot: u32, validity: U32Validity) {
+        self.set_place_u32_validity(AdvicePlace::local(slot), validity);
+    }
+
+    /// Return the current `u32` validity fact for a tracked place.
+    #[cfg(test)]
+    pub(crate) fn place_u32_validity(&self, place: &AdvicePlace) -> U32Validity {
+        self.u32_validity_for_place(place)
     }
 
     /// Join two abstract states conservatively.
@@ -198,6 +332,48 @@ impl AdviceState {
             .intersection(&other.nonzero_identities)
             .cloned()
             .collect();
+        let proven_identities = self
+            .u32_valid_identities
+            .intersection(&other.u32_valid_identities)
+            .cloned()
+            .collect::<HashSet<_>>();
+        let tracked_places = joined
+            .facts
+            .keys()
+            .cloned()
+            .chain(self.u32_validity.keys().cloned())
+            .chain(other.u32_validity.keys().cloned())
+            .chain(joined.aliases.keys().cloned().map(AdvicePlace::Var))
+            .chain(joined.local_aliases.keys().copied().map(AdvicePlace::Local))
+            .collect::<HashSet<_>>();
+        joined.u32_validity.clear();
+        joined.u32_valid_identities.clear();
+        for place in tracked_places {
+            let direct_validity = self
+                .u32_validity
+                .get(&place)
+                .copied()
+                .unwrap_or(U32Validity::Unknown)
+                .join(
+                    other
+                        .u32_validity
+                        .get(&place)
+                        .copied()
+                        .unwrap_or(U32Validity::Unknown),
+                );
+            let identity_validity = joined
+                .identity_for_place(&place)
+                .filter(|identity| proven_identities.contains(identity))
+                .map(|_| U32Validity::ProvenU32)
+                .unwrap_or(U32Validity::Unknown);
+            let validity = if direct_validity.is_proven() || identity_validity.is_proven() {
+                U32Validity::ProvenU32
+            } else {
+                U32Validity::Unknown
+            };
+            joined.set_place_u32_validity(place, validity);
+        }
+        joined.rebuild_u32_identity_cache();
         joined
     }
 }
@@ -234,7 +410,7 @@ mod tests {
     use super::{AdvicePlace, AdviceState};
     use crate::{
         abstract_interp::JoinSemiLattice,
-        unconstrained_advice::domain::AdviceFact,
+        unconstrained_advice::{domain::AdviceFact, u32_domain::U32Validity},
     };
     use masm_decompiler::ir::Var;
 
@@ -268,5 +444,108 @@ mod tests {
         );
         assert_eq!(lhs.fact_for_var(&rhs_var), AdviceFact::from_input(2));
         assert!(!lhs.join_assign(&rhs));
+    }
+
+    #[test]
+    fn join_drops_u32_proof_when_only_one_path_validates() {
+        let mut lhs = AdviceState::default();
+        let rhs = AdviceState::default();
+        lhs.set_place_u32_validity(AdvicePlace::local(0), U32Validity::ProvenU32);
+
+        let joined = lhs.join(&rhs);
+
+        assert!(joined.u32_validity.is_empty());
+    }
+
+    #[test]
+    fn overwriting_a_place_clears_stale_u32_proof() {
+        let var = test_var(0);
+        let mut state = AdviceState::default();
+        state.set_place_u32_validity(AdvicePlace::var(&var), U32Validity::ProvenU32);
+        state.set_place_u32_validity(AdvicePlace::local(0), U32Validity::ProvenU32);
+
+        state.set_var_fact(&var, AdviceFact::from_input(0));
+        state.set_local_fact(0, AdviceFact::from_input(1));
+
+        assert_eq!(
+            state.place_u32_validity(&AdvicePlace::var(&var)),
+            U32Validity::Unknown
+        );
+        assert_eq!(
+            state.place_u32_validity(&AdvicePlace::local(0)),
+            U32Validity::Unknown
+        );
+    }
+
+    #[test]
+    fn sanitizing_one_alias_marks_all_current_aliases_as_proven_u32() {
+        let source = test_var(0);
+        let copy = test_var(1);
+        let mut state = AdviceState::default();
+        let identity = state.identity_for_var(&source);
+        state.set_var_fact(&source, AdviceFact::from_input(0));
+        state.set_var_fact(&copy, AdviceFact::from_input(0));
+        state.set_var_identity(&copy, identity.clone());
+        state.set_local_fact(0, AdviceFact::from_input(0));
+        state.set_local_identity(0, Some(identity));
+
+        state.sanitize_var(&source);
+
+        assert_eq!(
+            state.place_u32_validity(&AdvicePlace::var(&source)),
+            U32Validity::ProvenU32
+        );
+        assert_eq!(
+            state.place_u32_validity(&AdvicePlace::var(&copy)),
+            U32Validity::ProvenU32
+        );
+        assert_eq!(
+            state.place_u32_validity(&AdvicePlace::local(0)),
+            U32Validity::ProvenU32
+        );
+    }
+
+    #[test]
+    fn join_preserves_u32_proof_when_each_path_validates_a_different_alias() {
+        let source = test_var(0);
+        let alias = test_var(1);
+        let mut lhs = AdviceState::default();
+        let mut rhs = AdviceState::default();
+        let identity = lhs.identity_for_var(&source);
+
+        for state in [&mut lhs, &mut rhs] {
+            state.set_var_fact(&source, AdviceFact::from_input(0));
+            state.set_var_fact(&alias, AdviceFact::from_input(0));
+            state.set_var_identity(&alias, identity.clone());
+        }
+
+        lhs.set_var_u32_validity(&source, U32Validity::ProvenU32);
+        rhs.set_var_u32_validity(&alias, U32Validity::ProvenU32);
+
+        let joined = lhs.join(&rhs);
+
+        assert_eq!(
+            joined.place_u32_validity(&AdvicePlace::var(&source)),
+            U32Validity::ProvenU32
+        );
+        assert_eq!(
+            joined.place_u32_validity(&AdvicePlace::var(&alias)),
+            U32Validity::ProvenU32
+        );
+    }
+
+    #[test]
+    fn join_preserves_direct_local_u32_proof_without_alias_identity() {
+        let mut lhs = AdviceState::default();
+        let mut rhs = AdviceState::default();
+        lhs.set_local_u32_validity(0, U32Validity::ProvenU32);
+        rhs.set_local_u32_validity(0, U32Validity::ProvenU32);
+
+        let joined = lhs.join(&rhs);
+
+        assert_eq!(
+            joined.place_u32_validity(&AdvicePlace::local(0)),
+            U32Validity::ProvenU32
+        );
     }
 }

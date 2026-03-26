@@ -9,6 +9,7 @@ mod provenance;
 mod summary;
 mod state;
 mod transfer;
+mod u32_domain;
 mod u32;
 mod walker;
 
@@ -26,3 +27,4 @@ pub use summary::{
     AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummary, AdviceSummaryMap,
     CallArgumentRequirement,
 };
+pub use u32_domain::U32Validity;

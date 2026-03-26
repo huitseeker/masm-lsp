@@ -10,6 +10,7 @@ use super::{
     domain::AdviceFact,
     state::EqZeroWitness,
     summary::AdviceSummaryMap,
+    u32_domain::U32Validity,
 };
 pub(crate) use super::state::Env;
 
@@ -35,6 +36,7 @@ pub(crate) fn assign_expr_metadata(dest: &Var, expr: &Expr, env: &mut Env) {
         env.clear_var_identity(dest);
     }
     env.set_var_zero_test(dest, eq_zero_witness_for_expr(expr, env));
+    env.set_var_u32_validity(dest, expr_u32_validity(expr, env));
 }
 
 /// Preserve metadata across a phi only when both sides agree exactly.
@@ -61,6 +63,13 @@ pub(crate) fn assign_phi_metadata(
     } else {
         env.set_var_zero_test(dest, None);
     }
+
+    env.set_var_u32_validity(
+        dest,
+        lhs_env
+            .u32_validity_for_var(lhs_var)
+            .join(rhs_env.u32_validity_for_var(rhs_var)),
+    );
 }
 
 /// Join one loop-body evaluation back into the current abstract loop state.
@@ -195,6 +204,64 @@ pub(crate) fn expr_output_fact(expr: &Expr, env: &Env) -> AdviceFact {
     }
 }
 
+/// Compute the `u32` validity of an expression result.
+pub(crate) fn expr_u32_validity(expr: &Expr, env: &Env) -> U32Validity {
+    match expr {
+        Expr::Var(var) => env.u32_validity_for_var(var),
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => expr_u32_validity(then_expr, env).join(expr_u32_validity(else_expr, env)),
+        Expr::Unary(op, inner) => match op {
+            UnOp::U32Cast
+            | UnOp::U32Test
+            | UnOp::U32Not
+            | UnOp::U32Clz
+            | UnOp::U32Ctz
+            | UnOp::U32Clo
+            | UnOp::U32Cto => U32Validity::ProvenU32,
+            UnOp::Neg | UnOp::Inv | UnOp::Pow2 | UnOp::Not => {
+                let _ = inner;
+                U32Validity::Unknown
+            }
+        },
+        Expr::Binary(op, lhs, rhs) => match op {
+            BinOp::U32And
+            | BinOp::U32Or
+            | BinOp::U32Xor
+            | BinOp::U32Shl
+            | BinOp::U32Shr
+            | BinOp::U32Rotr
+            | BinOp::U32Lt
+            | BinOp::U32Lte
+            | BinOp::U32Gt
+            | BinOp::U32Gte
+            | BinOp::U32WrappingAdd
+            | BinOp::U32WrappingSub
+            | BinOp::U32WrappingMul => U32Validity::ProvenU32,
+            BinOp::U32Exp => U32Validity::Unknown,
+            BinOp::Add
+            | BinOp::Sub
+            | BinOp::Mul
+            | BinOp::Div
+            | BinOp::And
+            | BinOp::Or
+            | BinOp::Xor
+            | BinOp::Eq
+            | BinOp::Neq
+            | BinOp::Lt
+            | BinOp::Lte
+            | BinOp::Gt
+            | BinOp::Gte => {
+                let _ = (lhs, rhs);
+                U32Validity::Unknown
+            }
+        },
+        Expr::EqW { .. } | Expr::True | Expr::False | Expr::Constant(_) => U32Validity::Unknown,
+    }
+}
+
 /// Apply the common provenance transfer semantics of one intrinsic statement.
 pub(crate) fn apply_intrinsic_effect(
     span: miden_debug_types::SourceSpan,
@@ -219,6 +286,20 @@ pub(crate) fn apply_intrinsic_effect(
             for result in &intrinsic.results {
                 env.set_var_fact(result, AdviceFact::bottom());
                 env.clear_var_metadata(result);
+                env.set_var_u32_validity(result, U32Validity::ProvenU32);
+            }
+        }
+        "u32testw" => {
+            if let Some((flag, preserved)) = intrinsic.results.split_first() {
+                env.set_var_fact(flag, AdviceFact::bottom());
+                env.clear_var_metadata(flag);
+                env.set_var_u32_validity(flag, U32Validity::ProvenU32);
+                for (result, arg) in preserved.iter().zip(intrinsic.args.iter()) {
+                    env.set_var_fact(result, env.fact_for_var(arg));
+                    env.set_var_u32_validity(result, env.u32_validity_for_var(arg));
+                    env.set_var_identity(result, env.identity_for_var(arg));
+                    env.set_var_zero_test(result, env.zero_test_for_var(arg));
+                }
             }
         }
         "is_odd" => {
@@ -246,6 +327,7 @@ pub(crate) fn apply_intrinsic_effect(
             for result in &intrinsic.results {
                 env.set_var_fact(result, AdviceFact::bottom());
                 env.clear_var_metadata(result);
+                env.set_var_u32_validity(result, U32Validity::ProvenU32);
             }
         }
         _ => {
@@ -263,6 +345,10 @@ pub(crate) fn apply_intrinsic_effect(
 pub(crate) fn apply_local_store(values: &[Var], index: u32, env: &mut Env) {
     let fact = AdviceFact::join_all(values.iter().map(|var| env.fact_for_var(var)));
     env.set_local_fact(index, fact);
+    let validity = single_var(values)
+        .map(|var| env.u32_validity_for_var(var))
+        .unwrap_or(U32Validity::Unknown);
+    env.set_local_u32_validity(index, validity);
     let identity = single_var(values).map(|var| env.identity_for_var(var));
     let witness = single_var(values).and_then(|var| env.zero_test_for_var(var));
     env.set_local_identity(index, identity);
@@ -284,6 +370,7 @@ pub(crate) fn apply_local_store_word(
             LocalAccessKind::Element => index,
         };
         env.set_local_fact(slot, env.fact_for_var(value));
+        env.set_local_u32_validity(slot, env.u32_validity_for_var(value));
         env.set_local_identity(slot, None);
         env.set_local_zero_test(slot, None);
     }
@@ -296,6 +383,7 @@ pub(crate) fn apply_local_load_scalar(outputs: &[Var], index: u32, env: &mut Env
     let witness = env.zero_test_for_local(index);
     for output in outputs {
         env.set_var_fact(output, fact.clone());
+        env.set_var_u32_validity(output, env.u32_validity_for_local(index));
         if let Some(identity) = identity.clone() {
             env.set_var_identity(output, identity);
         } else {
@@ -319,6 +407,7 @@ pub(crate) fn apply_local_load_word(
             LocalAccessKind::Element => index,
         };
         env.set_var_fact(output, env.fact_for_local(slot));
+        env.set_var_u32_validity(output, env.u32_validity_for_local(slot));
         env.clear_var_metadata(output);
     }
 }
@@ -328,6 +417,7 @@ pub(crate) fn apply_local_load_word(
 /// This is the explicit summary-application step of the Phase 1 abstract interpreter: resolve the
 /// callee summary, substitute caller argument facts into summarized outputs, and write the results
 /// back into the caller state.
+///
 pub(crate) fn apply_callee_summary(
     env: &mut Env,
     target: &str,
@@ -348,9 +438,49 @@ pub(crate) fn apply_callee_summary(
         .iter()
         .map(|arg| env.fact_for_var(arg))
         .collect::<Vec<_>>();
-    for (result, summary_fact) in results.iter().zip(summary.outputs().iter()) {
+    let caller_arg_u32_validity = args
+        .iter()
+        .map(|arg| env.u32_validity_for_var(arg))
+        .collect::<Vec<_>>();
+    for ((arg, summary_u32), caller_u32) in args
+        .iter()
+        .zip(summary.u32_inputs().iter())
+        .zip(caller_arg_u32_validity.iter().copied())
+    {
+        env.set_var_u32_validity(
+            arg,
+            if summary_u32.is_proven() || caller_u32.is_proven() {
+                U32Validity::ProvenU32
+            } else {
+                U32Validity::Unknown
+            },
+        );
+    }
+    for (((result, summary_fact), summary_u32), forwarded_input) in results
+        .iter()
+        .zip(summary.outputs().iter())
+        .zip(summary.u32_outputs().iter())
+        .zip(summary.forwarded_inputs().iter())
+    {
         env.set_var_fact(result, substitute_output_fact(summary_fact, &arg_facts));
-        env.clear_var_metadata(result);
+        let forwarded_arg = forwarded_input.and_then(|input_index| args.get(input_index));
+        let forwarded_validity = forwarded_arg
+            .map(|arg| env.u32_validity_for_var(arg))
+            .unwrap_or(U32Validity::Unknown);
+        env.set_var_u32_validity(
+            result,
+            if summary_u32.is_proven() || forwarded_validity.is_proven() {
+                U32Validity::ProvenU32
+            } else {
+                U32Validity::Unknown
+            },
+        );
+        if let Some(arg) = forwarded_arg {
+            env.set_var_identity(result, env.identity_for_var(arg));
+            env.set_var_zero_test(result, env.zero_test_for_var(arg));
+        } else {
+            env.clear_var_metadata(result);
+        }
     }
     for result in results.iter().skip(summary.output_count()) {
         env.set_var_fact(result, AdviceFact::bottom());
@@ -428,7 +558,9 @@ fn apply_adv_pipe_effect(
         for (offset, result) in intrinsic.results[1..5].iter().enumerate() {
             let preserved_input = &intrinsic.args[11 - offset];
             env.set_var_fact(result, env.fact_for_var(preserved_input));
-            env.clear_var_metadata(result);
+            env.set_var_u32_validity(result, env.u32_validity_for_var(preserved_input));
+            env.set_var_identity(result, env.identity_for_var(preserved_input));
+            env.set_var_zero_test(result, env.zero_test_for_var(preserved_input));
         }
 
         for result in &intrinsic.results[5..] {
@@ -468,9 +600,16 @@ fn substitute_output_fact(summary_fact: &AdviceFact, arg_facts: &[AdviceFact]) -
 mod tests {
     use std::collections::HashMap;
 
-    use super::{apply_callee_summary, AdviceFact, Env};
-    use crate::unconstrained_advice::summary::AdviceSummary;
-    use masm_decompiler::{ir::Var, SymbolPath};
+    use super::{apply_callee_summary, apply_intrinsic_effect, AdviceFact, Env};
+    use crate::unconstrained_advice::{
+        state::AdvicePlace,
+        summary::AdviceSummary,
+        u32_domain::U32Validity,
+    };
+    use masm_decompiler::{
+        ir::{BinOp, Expr, Intrinsic, Var},
+        SymbolPath,
+    };
     use miden_debug_types::SourceSpan;
 
     /// Return a small synthetic SSA variable for transfer tests.
@@ -524,5 +663,408 @@ mod tests {
         );
 
         assert_eq!(env.fact_for_var(&result), AdviceFact::bottom());
+    }
+
+    #[test]
+    fn u32assert_marks_its_operand_as_proven_u32() {
+        let arg = test_var(0);
+        let mut env = Env::default();
+        let fact = AdviceFact::from_input(0);
+        env.set_var_fact(&arg, fact.clone());
+
+        let intrinsic = Intrinsic {
+            name: "u32assert".to_string(),
+            args: vec![arg],
+            results: Vec::new(),
+        };
+
+        apply_intrinsic_effect(SourceSpan::UNKNOWN, &intrinsic, &mut env);
+
+        assert_eq!(env.fact_for_var(&intrinsic.args[0]), fact);
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::var(&intrinsic.args[0])),
+            U32Validity::ProvenU32
+        );
+    }
+
+    #[test]
+    fn u32cast_assignment_marks_the_result_as_proven_u32() {
+        let input = test_var(0);
+        let result = test_var(1);
+        let mut env = Env::default();
+        env.set_var_fact(&input, AdviceFact::from_input(0));
+
+        super::assign_expr_metadata(&result, &Expr::Unary(masm_decompiler::ir::UnOp::U32Cast, Box::new(Expr::Var(input))), &mut env);
+
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::var(&result)),
+            U32Validity::ProvenU32
+        );
+    }
+
+    #[test]
+    fn u32test_assignment_marks_the_boolean_result_as_proven_u32() {
+        let input = test_var(0);
+        let result = test_var(1);
+        let other = test_var(2);
+        let mut env = Env::default();
+        env.set_var_fact(&input, AdviceFact::from_input(0));
+
+        super::assign_expr_metadata(
+            &result,
+            &Expr::Unary(masm_decompiler::ir::UnOp::U32Test, Box::new(Expr::Var(input))),
+            &mut env,
+        );
+
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::var(&result)),
+            U32Validity::ProvenU32
+        );
+        assert_eq!(
+            super::super::u32::expr_u32_sink_fact(
+                &Expr::Binary(
+                    BinOp::U32WrappingAdd,
+                    Box::new(Expr::Var(result)),
+                    Box::new(Expr::Var(other)),
+                ),
+                &env,
+            ),
+            AdviceFact::bottom()
+        );
+    }
+
+    #[test]
+    fn local_round_trip_preserves_u32_validity() {
+        let input = test_var(0);
+        let output = test_var(1);
+        let mut env = Env::default();
+        env.set_var_u32_validity(&input, U32Validity::ProvenU32);
+
+        super::apply_local_store(std::slice::from_ref(&input), 0, &mut env);
+        super::apply_local_load_scalar(std::slice::from_ref(&output), 0, &mut env);
+
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::local(0)),
+            U32Validity::ProvenU32
+        );
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::var(&output)),
+            U32Validity::ProvenU32
+        );
+    }
+
+    #[test]
+    fn adv_pipe_preserves_u32_validity_for_forwarded_inputs() {
+        let mut env = Env::default();
+        let args = (0u8..13).map(test_var).collect::<Vec<_>>();
+        let results = (13u8..26).map(test_var).collect::<Vec<_>>();
+        let preserved_input = args[11].clone();
+        env.set_var_fact(&preserved_input, AdviceFact::from_input(0));
+        env.set_var_u32_validity(&preserved_input, U32Validity::ProvenU32);
+
+        let intrinsic = Intrinsic {
+            name: "adv_pipe".to_string(),
+            args,
+            results: results.clone(),
+        };
+
+        apply_intrinsic_effect(SourceSpan::UNKNOWN, &intrinsic, &mut env);
+
+        assert_eq!(env.fact_for_var(&results[1]), AdviceFact::from_input(0));
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::var(&results[1])),
+            U32Validity::ProvenU32
+        );
+        assert_eq!(env.identity_for_var(&results[1]), env.identity_for_var(&preserved_input));
+    }
+
+    #[test]
+    fn u32split_marks_both_limbs_as_proven_u32() {
+        let input = test_var(0);
+        let lo = test_var(1);
+        let hi = test_var(2);
+        let mut env = Env::default();
+
+        let intrinsic = Intrinsic {
+            name: "u32split".to_string(),
+            args: vec![input],
+            results: vec![lo.clone(), hi.clone()],
+        };
+
+        apply_intrinsic_effect(SourceSpan::UNKNOWN, &intrinsic, &mut env);
+
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::var(&lo)),
+            U32Validity::ProvenU32
+        );
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::var(&hi)),
+            U32Validity::ProvenU32
+        );
+    }
+
+    #[test]
+    fn u32testw_marks_the_boolean_result_as_proven_u32() {
+        let mut env = Env::default();
+        let args = (0u8..4).map(test_var).collect::<Vec<_>>();
+        let results = (4u8..9).map(test_var).collect::<Vec<_>>();
+        env.set_var_fact(&args[0], AdviceFact::from_input(0));
+
+        let intrinsic = Intrinsic {
+            name: "u32testw".to_string(),
+            args,
+            results: results.clone(),
+        };
+
+        apply_intrinsic_effect(SourceSpan::UNKNOWN, &intrinsic, &mut env);
+
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::var(&results[0])),
+            U32Validity::ProvenU32
+        );
+        assert_eq!(
+            super::super::u32::intrinsic_u32_sink_fact(
+                &Intrinsic {
+                    name: "u32overflowing_add".to_string(),
+                    args: vec![results[0].clone()],
+                    results: Vec::new(),
+                },
+                &env,
+            ),
+            AdviceFact::bottom()
+        );
+    }
+
+    #[test]
+    fn phi_join_keeps_u32_validity_only_when_both_inputs_are_proven() {
+        let lhs = test_var(0);
+        let rhs = test_var(1);
+        let dest = test_var(2);
+        let mut lhs_env = Env::default();
+        let rhs_env = Env::default();
+        let mut joined = Env::default();
+        lhs_env.set_var_u32_validity(&lhs, U32Validity::ProvenU32);
+
+        super::assign_phi_metadata(&dest, &lhs, &lhs_env, &rhs, &rhs_env, &mut joined);
+
+        assert_eq!(
+            joined.place_u32_validity(&AdvicePlace::var(&dest)),
+            U32Validity::Unknown
+        );
+    }
+
+    #[test]
+    fn ordinary_arithmetic_does_not_infer_u32_validity() {
+        let lhs = test_var(0);
+        let rhs = test_var(1);
+        let result = test_var(2);
+        let mut env = Env::default();
+        env.set_var_u32_validity(&lhs, U32Validity::ProvenU32);
+        env.set_var_u32_validity(&rhs, U32Validity::ProvenU32);
+
+        super::assign_expr_metadata(
+            &result,
+            &Expr::Binary(BinOp::Add, Box::new(Expr::Var(lhs)), Box::new(Expr::Var(rhs))),
+            &mut env,
+        );
+
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::var(&result)),
+            U32Validity::Unknown
+        );
+    }
+
+    #[test]
+    fn u32exp_result_is_not_assumed_to_be_u32() {
+        let base = test_var(0);
+        let exponent = test_var(1);
+        let result = test_var(2);
+        let mut env = Env::default();
+        env.set_var_u32_validity(&base, U32Validity::ProvenU32);
+        env.set_var_u32_validity(&exponent, U32Validity::ProvenU32);
+
+        super::assign_expr_metadata(
+            &result,
+            &Expr::Binary(
+                BinOp::U32Exp,
+                Box::new(Expr::Var(base)),
+                Box::new(Expr::Var(exponent)),
+            ),
+            &mut env,
+        );
+
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::var(&result)),
+            U32Validity::Unknown
+        );
+    }
+
+    #[test]
+    fn call_summary_preserves_u32_validity_from_the_callee_summary() {
+        let arg = test_var(0);
+        let result = test_var(1);
+        let mut env = Env::default();
+
+        let summaries = HashMap::from([(
+            SymbolPath::new("callee".to_string()),
+            AdviceSummary::with_u32_outputs(
+                vec![AdviceFact::from_input(0)],
+                vec![U32Validity::ProvenU32],
+            ),
+        )]);
+
+        apply_callee_summary(
+            &mut env,
+            "callee",
+            &[arg],
+            std::slice::from_ref(&result),
+            &summaries,
+        );
+
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::var(&result)),
+            U32Validity::ProvenU32
+        );
+    }
+
+    #[test]
+    fn call_summary_applies_input_u32_postconditions() {
+        let arg = test_var(0);
+        let mut env = Env::default();
+
+        let summaries = HashMap::from([(
+            SymbolPath::new("callee".to_string()),
+            AdviceSummary::with_u32_postconditions(
+                Vec::new(),
+                Vec::new(),
+                vec![U32Validity::ProvenU32],
+            ),
+        )]);
+
+        apply_callee_summary(&mut env, "callee", std::slice::from_ref(&arg), &[], &summaries);
+
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::var(&arg)),
+            U32Validity::ProvenU32
+        );
+    }
+
+    #[test]
+    fn call_summary_does_not_clear_a_caller_proof_when_postcondition_is_unknown() {
+        let arg = test_var(0);
+        let mut env = Env::default();
+        env.set_var_u32_validity(&arg, U32Validity::ProvenU32);
+
+        let summaries = HashMap::from([(
+            SymbolPath::new("callee".to_string()),
+            AdviceSummary::with_u32_postconditions(Vec::new(), Vec::new(), vec![U32Validity::Unknown]),
+        )]);
+
+        apply_callee_summary(&mut env, "callee", std::slice::from_ref(&arg), &[], &summaries);
+
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::var(&arg)),
+            U32Validity::ProvenU32
+        );
+    }
+
+    #[test]
+    fn call_summary_preserves_forwarded_caller_u32_proof() {
+        let arg = test_var(0);
+        let result = test_var(1);
+        let mut env = Env::default();
+        env.set_var_u32_validity(&arg, U32Validity::ProvenU32);
+
+        let summaries = HashMap::from([(
+            SymbolPath::new("callee".to_string()),
+            AdviceSummary::with_forwarding(
+                vec![AdviceFact::from_input(0)],
+                vec![U32Validity::Unknown],
+                vec![Some(0)],
+                Vec::new(),
+            ),
+        )]);
+
+        apply_callee_summary(
+            &mut env,
+            "callee",
+            std::slice::from_ref(&arg),
+            std::slice::from_ref(&result),
+            &summaries,
+        );
+
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::var(&result)),
+            U32Validity::ProvenU32
+        );
+    }
+
+    #[test]
+    fn call_summary_can_forward_a_proof_across_aliased_formals() {
+        let validated = test_var(0);
+        let forwarded = test_var(1);
+        let result = test_var(2);
+        let mut env = Env::default();
+        env.set_var_fact(&validated, AdviceFact::from_input(0));
+        env.set_var_fact(&forwarded, AdviceFact::from_input(0));
+        env.set_var_identity(&forwarded, env.identity_for_var(&validated));
+
+        let summaries = HashMap::from([(
+            SymbolPath::new("callee".to_string()),
+            AdviceSummary::with_forwarding(
+                vec![AdviceFact::from_input(1)],
+                vec![U32Validity::Unknown],
+                vec![Some(1)],
+                vec![U32Validity::ProvenU32, U32Validity::Unknown],
+            ),
+        )]);
+
+        apply_callee_summary(
+            &mut env,
+            "callee",
+            &[validated, forwarded],
+            std::slice::from_ref(&result),
+            &summaries,
+        );
+
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::var(&result)),
+            U32Validity::ProvenU32
+        );
+    }
+
+    #[test]
+    fn forwarded_result_keeps_alias_identity_for_later_sanitization() {
+        let arg = test_var(0);
+        let sibling = test_var(1);
+        let result = test_var(2);
+        let mut env = Env::default();
+        env.set_var_fact(&arg, AdviceFact::from_input(0));
+        env.set_var_fact(&sibling, AdviceFact::from_input(0));
+        env.set_var_identity(&sibling, env.identity_for_var(&arg));
+
+        let summaries = HashMap::from([(
+            SymbolPath::new("callee".to_string()),
+            AdviceSummary::with_forwarding(
+                vec![AdviceFact::from_input(0)],
+                vec![U32Validity::Unknown],
+                vec![Some(0)],
+                Vec::new(),
+            ),
+        )]);
+
+        apply_callee_summary(
+            &mut env,
+            "callee",
+            std::slice::from_ref(&arg),
+            std::slice::from_ref(&result),
+            &summaries,
+        );
+        env.sanitize_var(&result);
+
+        assert_eq!(
+            env.place_u32_validity(&AdvicePlace::var(&sibling)),
+            U32Validity::ProvenU32
+        );
     }
 }

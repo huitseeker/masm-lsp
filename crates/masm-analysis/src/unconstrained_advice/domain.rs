@@ -41,11 +41,6 @@ impl AdviceFact {
         }
     }
 
-    /// Return true if the fact carries any unconstrained-advice provenance.
-    pub fn is_tainted(&self) -> bool {
-        !self.source_spans.is_empty() || !self.from_inputs.is_empty()
-    }
-
     /// Return true if the fact has at least one concrete advice source.
     pub fn has_concrete_sources(&self) -> bool {
         !self.source_spans.is_empty()
