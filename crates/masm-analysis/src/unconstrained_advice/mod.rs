@@ -13,6 +13,9 @@ mod u32;
 mod walker;
 
 #[cfg(test)]
+mod corpus;
+
+#[cfg(test)]
 mod tests;
 
 pub use inter::{infer_unconstrained_advice, infer_unconstrained_advice_in_workspace};
