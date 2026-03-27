@@ -21,8 +21,9 @@ mod unconstrained_advice;
 
 pub use unconstrained_advice::infer_unconstrained_advice;
 pub use unconstrained_advice::{
-    infer_unconstrained_advice_in_workspace, AdviceDiagnostic, AdviceDiagnosticsMap,
-    AdviceSinkKind, AdviceSummary, AdviceSummaryMap, CallArgumentRequirement, U32Validity,
+    infer_unconstrained_advice_in_workspace, group_advice_diagnostics_by_origin,
+    AdviceDiagnostic, AdviceDiagnosticsMap, AdviceRootCauseGroup, AdviceSinkKind, AdviceSummary,
+    AdviceSummaryMap, CallArgumentRequirement, U32Validity,
 };
 
 pub use masm_decompiler::signature::SignatureMap;

@@ -1,6 +1,9 @@
 use masm_decompiler::frontend::testing::workspace_from_modules;
 
-use super::{AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, CallArgumentRequirement};
+use super::{
+    AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, CallArgumentRequirement,
+    group_advice_diagnostics_by_origin,
+};
 use crate::infer_unconstrained_advice_in_workspace;
 
 fn diagnostics_for(diags: &AdviceDiagnosticsMap, proc: &str) -> Vec<AdviceDiagnostic> {
@@ -260,6 +263,37 @@ fn diagnostics_retain_multiple_advice_origins() {
         bad.iter().any(|diag| diag.origins.len() == 2),
         "expected two origin spans, got: {bad:?}"
     );
+}
+
+#[test]
+fn origin_grouping_deduplicates_each_origin_per_diagnostic() {
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc bad\n    adv_push.1\n    dup\n    push.1\n    u32wrapping_add\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+
+    let groups = group_advice_diagnostics_by_origin(&diagnostics);
+
+    assert_eq!(groups.len(), 1, "expected one root-cause group, got: {groups:?}");
+    assert_eq!(groups[0].sink_count(), 1);
+}
+
+#[test]
+fn origin_grouping_sorts_largest_fanout_first() {
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc bad\n    adv_push.1\n    dup\n    push.1\n    u32wrapping_add\n    push.1\n    u32wrapping_add\nend\n\nproc other\n    adv_push.1\n    push.1\n    u32wrapping_add\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+
+    let groups = group_advice_diagnostics_by_origin(&diagnostics);
+
+    assert!(
+        groups.len() >= 2,
+        "expected at least two root-cause groups, got: {groups:?}"
+    );
+    assert!(groups[0].sink_count() >= groups[1].sink_count());
 }
 
 #[test]
