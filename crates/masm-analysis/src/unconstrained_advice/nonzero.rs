@@ -15,7 +15,10 @@ use super::{
         assign_phi_metadata, expr_is_proven_nonzero, expr_output_fact, refine_if_envs,
         refine_nonzero_from_intrinsic, seed_input_env, stmt_span, Env, MAX_LOOP_PASSES,
     },
-    summary::{AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummaryMap},
+    summary::{
+        AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummaryMap,
+        CallArgumentRequirement,
+    },
 };
 use crate::abstract_interp::Summary;
 
@@ -445,6 +448,7 @@ impl<'a> ProcNonZeroAnalyzer<'a> {
                 );
                 diagnostic.callee = Some(callee);
                 diagnostic.arg_index = Some(*index);
+                diagnostic.call_requirement = Some(CallArgumentRequirement::NonZero);
                 diagnostics.push(diagnostic);
             }
             required_inputs.extend(arg_fact.from_inputs.iter().copied());

@@ -16,9 +16,13 @@ mod walker;
 mod corpus;
 
 #[cfg(test)]
+mod stdlib_eval;
+
+#[cfg(test)]
 mod tests;
 
 pub use inter::{infer_unconstrained_advice, infer_unconstrained_advice_in_workspace};
 pub use summary::{
     AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummary, AdviceSummaryMap,
+    CallArgumentRequirement,
 };

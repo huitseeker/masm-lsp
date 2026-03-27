@@ -1,6 +1,6 @@
 use masm_decompiler::frontend::testing::workspace_from_modules;
 
-use super::{AdviceDiagnostic, AdviceDiagnosticsMap};
+use super::{AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, CallArgumentRequirement};
 use crate::infer_unconstrained_advice_in_workspace;
 
 fn diagnostics_for(diags: &AdviceDiagnosticsMap, proc: &str) -> Vec<AdviceDiagnostic> {
@@ -122,9 +122,37 @@ fn call_argument_warning_uses_callee_u32_requirement() {
         "expected call-argument advice diagnostic, got: {caller:?}"
     );
     assert!(
+        caller.iter().any(|diag| {
+            diag.call_requirement == Some(CallArgumentRequirement::U32) && diag.is_u32_demo_sink()
+        }),
+        "expected structured u32 call-argument classification, got: {caller:?}"
+    );
+    assert!(
         caller.iter().any(|diag| !diag.origins.is_empty()),
         "expected call-argument origin spans, got: {caller:?}"
     );
+}
+
+#[test]
+fn u32_demo_filter_excludes_nonzero_call_arguments() {
+    let mut u32_call = AdviceDiagnostic::new(
+        crate::SymbolPath::new("advice::caller".to_string()),
+        miden_debug_types::SourceSpan::UNKNOWN,
+        AdviceSinkKind::CallArgument,
+        "u32 call",
+    );
+    u32_call.call_requirement = Some(CallArgumentRequirement::U32);
+
+    let mut nonzero_call = AdviceDiagnostic::new(
+        crate::SymbolPath::new("advice::caller".to_string()),
+        miden_debug_types::SourceSpan::UNKNOWN,
+        AdviceSinkKind::CallArgument,
+        "nonzero call",
+    );
+    nonzero_call.call_requirement = Some(CallArgumentRequirement::NonZero);
+
+    assert!(u32_call.is_u32_demo_sink());
+    assert!(!nonzero_call.is_u32_demo_sink());
 }
 
 #[test]

@@ -102,6 +102,15 @@ pub enum AdviceSinkKind {
     MerkleRoot,
 }
 
+/// Refinement for call-argument diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallArgumentRequirement {
+    /// The callee expects a `U32` argument.
+    U32,
+    /// The callee expects a proven non-zero argument.
+    NonZero,
+}
+
 /// Diagnostic emitted by unconstrained-advice analysis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdviceDiagnostic {
@@ -117,6 +126,8 @@ pub struct AdviceDiagnostic {
     pub callee: Option<SymbolPath>,
     /// Optional argument index for call-argument diagnostics.
     pub arg_index: Option<usize>,
+    /// Optional refinement for call-argument diagnostics.
+    pub call_requirement: Option<CallArgumentRequirement>,
     /// Kind of sink that triggered the diagnostic.
     pub sink: AdviceSinkKind,
 }
@@ -136,8 +147,20 @@ impl AdviceDiagnostic {
             message: message.into(),
             callee: None,
             arg_index: None,
+            call_requirement: None,
             sink,
         }
+    }
+
+    /// Return `true` when this diagnostic belongs to the `u32` Phase 2 demo surface.
+    pub fn is_u32_demo_sink(&self) -> bool {
+        matches!(
+            self.sink,
+            AdviceSinkKind::U32Expression | AdviceSinkKind::U32Intrinsic
+        ) || matches!(
+            self.call_requirement,
+            Some(CallArgumentRequirement::U32)
+        )
     }
 }
 
